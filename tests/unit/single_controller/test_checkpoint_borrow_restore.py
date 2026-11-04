@@ -249,7 +249,13 @@ def _controller(
     controller._rollout_recovery_enabled = True
     # Dynamic sampling off: these fixtures exercise the fault-tolerance path.
     controller._dynamic_sampling_enabled = False
-    controller._dynamic_sampling_max_replacements = 0
+    controller._filtered_prompt_budget = 0
+    controller._filtered_reserve = deque()
+    controller._filtered_prompts_by_step = {}
+    controller._steps_allowed_short = set()
+    controller._filtered_refill_wanted = asyncio.Event()
+    controller._filtered_pool_cv = asyncio.Condition()
+    controller._dataloader_exhausted = False
     controller._restored_replay_groups_to_regenerate = []
     controller._batch_shortfall = {}
     controller._batch_replacements = {}
@@ -371,7 +377,7 @@ async def _exercise_round_trip(
         loader=_Loader([], dataset),
         generation=_Generation(),
         dispatch_index=snapshot.sampler_dispatch_index,
-        replacement_reserve=snapshot.replacement_reserve,
+        replacement_reserve=snapshot.replacement_reserve["replacement"],
         checkpoint_path=checkpoint_path,
         checkpoint_metadata=checkpoint_metadata,
     )

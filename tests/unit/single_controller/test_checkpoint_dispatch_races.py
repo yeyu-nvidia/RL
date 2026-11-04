@@ -587,7 +587,13 @@ def _reserve_controller() -> Any:
     controller._rollout_recovery_enabled = True
     # Dynamic sampling off: these fixtures exercise the fault-tolerance path.
     controller._dynamic_sampling_enabled = False
-    controller._dynamic_sampling_max_replacements = 0
+    controller._filtered_prompt_budget = 0
+    controller._filtered_reserve = deque()
+    controller._filtered_prompts_by_step = {}
+    controller._steps_allowed_short = set()
+    controller._filtered_refill_wanted = asyncio.Event()
+    controller._filtered_pool_cv = asyncio.Condition()
+    controller._dataloader_exhausted = False
     controller._async_cfg = SimpleNamespace(
         rollout_failure=SimpleNamespace(
             on_dropped_prompt="replace",
@@ -2275,7 +2281,7 @@ def test_checkpoint_waits_for_replacement_reserve_refill() -> None:
 
         async def refill() -> None:
             async with controller._data_plane_checkpoint_barrier.mutation():
-                assert controller._divert_batch_to_reserve(batch)
+                assert await controller._divert_batch_to_reserve(batch)
                 mutation_applied.set()
                 await release_mutation.wait()
 
