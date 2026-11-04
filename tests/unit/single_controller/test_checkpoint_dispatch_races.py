@@ -239,6 +239,7 @@ def _sidecar_state(ledger: RolloutRecoveryLedger) -> dict[str, Any]:
     """Ledger state plus the controller-owned keys every sidecar must carry."""
     return {
         **ledger.state_dict(),
+        "steps_allowed_short": [],
         "reward_settings": None,
         "finalizer_metrics_by_group": {},
         "finalizer_rewards_by_group": {},
@@ -1595,6 +1596,7 @@ def test_recovery_replays_step_7_without_readmitting_the_batch(
         saved_state = build_rollout_recovery_state(
             saved_ledger,
             batch_shortfall={6: 1},
+            steps_allowed_short={6},
             sampler_stamps_target_steps=True,
         )
         saved_state["schema_version"] = schema_version
@@ -1674,6 +1676,12 @@ def test_recovery_replays_step_7_without_readmitting_the_batch(
         assert sampler.admission_commits == 0
         assert sampler.dispatch_index == 7
         assert controller._batch_shortfall == {6: 1}
+        assert controller._steps_allowed_short == {6}
+        controller._algo_cfg = SimpleNamespace(num_prompts_per_step=2)
+        controller._async_cfg.rollout_failure = SimpleNamespace(
+            min_step_batch_fraction=1.0
+        )
+        assert controller._target_groups_for_step(6) == 1
         assert controller._sampler_stamps_target_steps is True
         recovery_metrics = controller._logger.log_metrics.call_args.args[0]
         assert recovery_metrics["groups_unfinished_found"] == 1.0
@@ -1727,6 +1735,7 @@ async def _turn_recovery_restart(
     saved_state = build_rollout_recovery_state(
         saved_ledger,
         batch_shortfall={},
+        steps_allowed_short=set(),
         sampler_stamps_target_steps=True,
     )
     recovery_path = tmp_path / ROLLOUT_RECOVERY_STATE_FILENAME
@@ -2418,7 +2427,7 @@ def test_checkpoint_completes_while_filtered_replacement_waits(exhausted: bool) 
         assert [g.prompt_id for g in manager.recovery_ledger.groups()] == (
             [] if exhausted else ["21"]
         )
-        assert controller._filtered_prompts_by_step == {7: 1}
+        assert controller._filtered_prompts_by_step == ({} if exhausted else {7: 1})
         assert (7 in controller._steps_allowed_short) == exhausted
 
     asyncio.run(asyncio.wait_for(exercise(), timeout=5))

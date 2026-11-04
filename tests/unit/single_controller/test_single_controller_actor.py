@@ -4640,6 +4640,7 @@ def test_train_pump_consumes_recovered_penalty_and_effort_statistics_once(
     state = build_rollout_recovery_state(
         RolloutRecoveryLedger(),
         batch_shortfall={},
+        steps_allowed_short=set(),
         sampler_stamps_target_steps=True,
         finalizer_metrics_by_group=pending,
         finalizer_rewards_by_group={

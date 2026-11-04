@@ -1467,6 +1467,7 @@ class SingleControllerActor:
                     }
 
                 self._batch_shortfall = parsed_state.batch_shortfall
+                self._steps_allowed_short = parsed_state.steps_allowed_short
                 canonical_state = self._buffer.metadata_state_dict(
                     saved_capacity=self._async_cfg.max_buffered_rollouts
                 )
@@ -2930,43 +2931,39 @@ class SingleControllerActor:
                 )
             )
 
-        max_epochs = self._algo_cfg.max_num_epochs
+        dataloader_iterator = self._iter_prompt_batches()
         async with asyncio.TaskGroup() as rollout_tasks:
             if self._rollout_recovery_enabled:
                 await self._redispatch_restored_rollouts(_launch)
-            while max_epochs is None or self._current_epoch < max_epochs:
-                if not self._rollout_recovery_enabled:
-                    # An explicit iterator, not `for ... in`, so the pump can pull an
-                    # extra batch for the filter pool while it waits to admit.
-                    plain_iterator = iter(self._dataloader)
-                    while True:
-                        prompt_batch = next(plain_iterator, None)
-                        if prompt_batch is None:
-                            self._dataloader_exhausted = True
-                            await self._wake_filtered_waiters()
-                            break
-                        if await self._divert_batch_to_reserve(prompt_batch):
-                            continue
-                        target_step = await self._admit_servicing_refills(
-                            plain_iterator
+            if not self._rollout_recovery_enabled:
+                # An explicit iterator, not `for ... in`, so the pump can pull an
+                # extra batch for the filter pool while it waits to admit.
+                while True:
+                    prompt_batch = next(dataloader_iterator, None)
+                    if prompt_batch is None:
+                        self._dataloader_exhausted = True
+                        await self._wake_filtered_waiters()
+                        break
+                    if await self._divert_batch_to_reserve(prompt_batch):
+                        continue
+                    target_step = await self._admit_servicing_refills(
+                        dataloader_iterator
+                    )
+                    if target_step is not None:
+                        self._sampler_stamps_target_steps = True
+                    self._require_unoccupied_target_step(target_step)
+                    for prompt_idx in range(prompt_batch.size):
+                        prompt: DatumSpec = {  # type: ignore
+                            k: v[prompt_idx] for k, v in prompt_batch.items()
+                        }
+                        await _launch(
+                            prompt,
+                            target_step,
+                            None,
+                            refill_iterator=dataloader_iterator,
                         )
-                        if target_step is not None:
-                            self._sampler_stamps_target_steps = True
-                        self._require_unoccupied_target_step(target_step)
-                        for prompt_idx in range(prompt_batch.size):
-                            prompt: DatumSpec = {  # type: ignore
-                                k: v[prompt_idx] for k, v in prompt_batch.items()
-                            }
-                            await _launch(
-                                prompt,
-                                target_step,
-                                None,
-                                refill_iterator=plain_iterator,
-                            )
-                    self._current_epoch += 1
-                    continue
 
-                dataloader_iterator = iter(self._dataloader)
+            else:
                 while True:
                     prompt_dispatches: list[tuple[DatumSpec, str]] = []
                     async with self._data_plane_checkpoint_barrier.mutation(
@@ -2975,7 +2972,6 @@ class SingleControllerActor:
                         try:
                             prompt_batch = next(dataloader_iterator)
                         except StopIteration:
-                            self._current_epoch += 1
                             self._dataloader_exhausted = True
                             await self._wake_filtered_waiters()
                             break
@@ -3023,6 +3019,13 @@ class SingleControllerActor:
 
         self._rollout_exhausted.set()
         print(f"rollout_pump: completed {self._current_epoch} epoch(s)", flush=True)
+
+    def _iter_prompt_batches(self) -> Iterator[BatchedDataDict[DatumSpec]]:
+        """Traverse epochs for both ordinary dispatch and on-demand refills."""
+        max_epochs = self._algo_cfg.max_num_epochs
+        while max_epochs is None or self._current_epoch < max_epochs:
+            yield from self._dataloader
+            self._current_epoch += 1
 
     async def _divert_batch_to_reserve(
         self, prompt_batch: BatchedDataDict[DatumSpec]
@@ -3227,9 +3230,9 @@ class SingleControllerActor:
         if target_step is None:
             return
         drawn = self._filtered_prompts_by_step.get(target_step, 0) + 1
-        self._filtered_prompts_by_step[target_step] = drawn
         allowance = self._filtered_prompt_budget - self._algo_cfg.num_prompts_per_step
         if drawn <= allowance:
+            self._filtered_prompts_by_step[target_step] = drawn
             return
         raise RuntimeError(
             f"dynamic sampling drew {drawn} replacement prompt(s) for target_step="
@@ -3264,7 +3267,6 @@ class SingleControllerActor:
             left. That is the end of the run, so the caller credits the step short and
             the step is exempted from the batch-size floor.
         """
-        self._charge_filtered_prompt(target_step)
         await self._wait_for_filtered_reserve()
         return self._pop_filtered_replacement(target_step)
 
@@ -3280,6 +3282,7 @@ class SingleControllerActor:
     ) -> Optional[DatumSpec]:
         """Consume an available spare, or finish a step after data exhaustion."""
         if self._filtered_reserve:
+            self._charge_filtered_prompt(target_step)
             return self._filtered_reserve.popleft()
         if not self._dataloader_exhausted:
             raise RuntimeError("filtered replacement pool emptied before consumption")
@@ -3292,8 +3295,6 @@ class SingleControllerActor:
         self, *, filtered: bool, target_step: Optional[int]
     ) -> AsyncIterator[DataPlaneMutationCut]:
         """Keep spare consumption and ledger transfer atomic without blocking saves."""
-        if filtered:
-            self._charge_filtered_prompt(target_step)
         while True:
             if filtered:
                 await self._wait_for_filtered_reserve()
@@ -5290,6 +5291,7 @@ class SingleControllerActor:
         recovery_state = build_rollout_recovery_state(
             self._rollout_manager.recovery_ledger,
             batch_shortfall=self._batch_shortfall,
+            steps_allowed_short=self._steps_allowed_short,
             sampler_stamps_target_steps=self._sampler_stamps_target_steps,
             finalizer_metrics_by_group=self._finalizer_metrics_by_group,
             finalizer_rewards_by_group=self._finalizer_rewards_by_group,
@@ -6438,6 +6440,7 @@ class SingleControllerActor:
                     rollout_recovery_state = build_rollout_recovery_state(
                         self._rollout_manager.recovery_ledger,
                         batch_shortfall=self._batch_shortfall,
+                        steps_allowed_short=self._steps_allowed_short,
                         sampler_stamps_target_steps=(self._sampler_stamps_target_steps),
                         finalizer_metrics_by_group=self._finalizer_metrics_by_group,
                         finalizer_rewards_by_group=self._finalizer_rewards_by_group,
@@ -6516,12 +6519,14 @@ class SingleControllerActor:
         await asyncio.to_thread(
             self._trainer.save_checkpoint,
             weights_path=os.path.join(checkpoint_path, "policy", "weights"),
-            # Always save policy weights so every PPO checkpoint has
-            # the same component layout. Before the first real policy
-            # update, omit optimizer and scheduler state because their
-            # lazily initialized state is not yet safe to checkpoint.
+            # GRPO may skip its first steps; only consumed samples prove an update.
+            # Uninitialized optimizer and scheduler state cannot be checkpointed.
             optimizer_path=os.path.join(checkpoint_path, "policy", "optimizer")
-            if self._checkpointer.save_optimizer and is_policy_training_step
+            if (
+                self._checkpointer.save_optimizer
+                and is_policy_training_step
+                and (self._is_ppo or self._consumed_samples > 0)
+            )
             else None,
             tokenizer_path=os.path.join(checkpoint_path, "policy", "tokenizer"),
             is_final_checkpoint=is_final_checkpoint,
