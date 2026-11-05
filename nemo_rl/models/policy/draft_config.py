@@ -150,6 +150,27 @@ class DFlashDraftConfig(_BlockDraftConfig):
     confidence_loss_alpha: float = 0.0
 
 
+class LiLiCorrDraftConfig(_BlockDraftConfig):
+    """Training options for LiLiCorr draft co-training.
+
+    LiLiCorr is a DFlash backbone plus a candidate-lattice reranker, so it
+    reuses the block-drafter fields and adds the reranker's loss weights. The
+    reranker geometry (hidden size, head count, layer count, candidate topk)
+    is read from the draft checkpoint's ``config.json`` alongside the other
+    architecture fields, so it is deliberately not configurable here -- a
+    mismatch against the trained weights is a silent accuracy loss, not an
+    error.
+    """
+
+    speculator_type: Literal["lilicorr"] = "lilicorr"
+    # The reranker's three-term objective. These have no analogue in DFlash's
+    # projected soft CE or DSpark's hard-CE/TVD/confidence terms, which is the
+    # part of LiLiCorr that is genuinely new rather than a rewiring.
+    reranker_ce_alpha: float = 1.0
+    reranker_margin_alpha: float = 1.0
+    reranker_penalty_alpha: float = 1.0
+
+
 def _speculator_type(v: Any) -> str:
     """Discriminator callback: default a missing tag to eagle3.
 
@@ -169,6 +190,7 @@ DraftConfig = Annotated[
         Annotated[Eagle3DraftConfig, Tag("eagle3")],
         Annotated[DSparkDraftConfig, Tag("dspark")],
         Annotated[DFlashDraftConfig, Tag("dflash")],
+        Annotated[LiLiCorrDraftConfig, Tag("lilicorr")],
     ],
     Discriminator(_speculator_type),
 ]

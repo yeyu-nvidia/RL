@@ -68,8 +68,39 @@ class Eagle3Speculator:
         )
 
 
-_SPECULATOR_FACTORIES: dict[str, type[Eagle3Speculator]] = {
+@dataclass(frozen=True)
+class LiLiCorrSpeculator:
+    """LiLiCorr draft speculator: DFlash backbone plus a candidate-lattice reranker.
+
+    The backbone is the existing tensor-parallel :class:`DFlashBody`; only the reranker
+    head is LiLiCorr-specific, which is the same split DSpark uses against DFlash.
+    """
+
+    config: Any
+
+    def build_model(
+        self,
+        *,
+        model_provider: ModelProviderMixin,
+        pg_collection: ProcessGroupCollection,
+        policy_model_chunk: MegatronModule,
+    ) -> MegatronModule | None:
+        """Build the LiLiCorr draft model for the policy chunk that owns it."""
+        from nemo_rl.models.megatron.draft.lilicorr_model import (
+            build_lilicorr_draft_model,
+        )
+
+        return build_lilicorr_draft_model(
+            model_provider=model_provider,
+            draft_config=self.config,
+            pg_collection=pg_collection,
+            policy_model_chunk=policy_model_chunk,
+        )
+
+
+_SPECULATOR_FACTORIES: dict[str, type[Eagle3Speculator] | type[LiLiCorrSpeculator]] = {
     "eagle3": Eagle3Speculator,
+    "lilicorr": LiLiCorrSpeculator,
 }
 
 
