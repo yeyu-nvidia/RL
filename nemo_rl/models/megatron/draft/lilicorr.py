@@ -218,3 +218,71 @@ def lilicorr_reranker_loss(
     penalty = flat_logits.pow(2).mean()
 
     return ce_alpha * ce + margin_alpha * margin + penalty_alpha * penalty
+
+
+@dataclass
+class LiLiCorrDraftOutput:
+    """What a LiLiCorr draft forward must hand the loss.
+
+    The backbone and the reranker are trained by different terms over different shapes, so
+    both have to survive the forward rather than one replacing the other:
+
+    * ``student_logits`` -- ``[B, S, V]`` next-token logits from the DFlash backbone, which
+      the existing :class:`DraftCrossEntropyLossFn` consumes against the teacher.
+    * ``reranker_logits`` -- ``[B, S, K]`` per-candidate scores.
+    * ``gold_index`` -- ``[B, S]`` index of the target's token within each slot's
+      candidates, ``-100`` where it is absent.
+    """
+
+    student_logits: Tensor
+    reranker_logits: Tensor
+    gold_index: Tensor
+
+
+def gold_index_from_candidates(candidate_ids: Tensor, target_ids: Tensor) -> Tensor:
+    """Locate the target's token among each slot's candidates.
+
+    Returns ``-100`` where the target token was not proposed. That is a normal outcome --
+    the backbone's topk missed -- and those slots must contribute nothing rather than be
+    scored against an arbitrary candidate, which would train the reranker toward a wrong
+    answer on exactly the positions it already failed.
+    """
+    match = candidate_ids.eq(target_ids.unsqueeze(-1))
+    found = match.any(dim=-1)
+    # argmax returns 0 for an all-false row; the `found` mask is what makes that safe.
+    return torch.where(
+        found, match.float().argmax(dim=-1), torch.full_like(target_ids, -100)
+    )
+
+
+def lilicorr_draft_loss(
+    output: LiLiCorrDraftOutput,
+    *,
+    backbone_loss: Tensor,
+    ce_alpha: float = 1.0,
+    margin_alpha: float = 1.0,
+    penalty_alpha: float = 1.0,
+) -> tuple[Tensor, dict[str, float]]:
+    """Combine the backbone's draft loss with the reranker's three terms.
+
+    ``backbone_loss`` comes from the existing draft cross-entropy path, so the DFlash
+    objective is unchanged and only the reranker terms are added. Returned metrics are
+    detached floats, so logging them cannot hold the graph alive.
+    """
+    rerank = lilicorr_reranker_loss(
+        output.reranker_logits,
+        output.gold_index,
+        ce_alpha=ce_alpha,
+        margin_alpha=margin_alpha,
+        penalty_alpha=penalty_alpha,
+    )
+    total = backbone_loss + rerank
+    scored = int(output.gold_index.ne(-100).sum())
+    return total, {
+        "draft_backbone_loss": float(backbone_loss.detach()),
+        "draft_reranker_loss": float(rerank.detach()),
+        # Share of slots whose target token the backbone actually proposed. A collapse here
+        # means the reranker is being trained on almost nothing, which a falling total
+        # loss would hide.
+        "draft_candidate_hit_rate": scored / max(output.gold_index.numel(), 1),
+    }
