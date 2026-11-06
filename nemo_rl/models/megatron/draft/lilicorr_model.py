@@ -237,12 +237,29 @@ def build_lilicorr_draft_model(
     # hidden (4096), which is also what the head's pass_hidden_proj expects. Building the
     # body at 1024 fails with "mat1 and mat2 shapes cannot be multiplied (Nx1024 and
     # 4096x1024)" the moment the head sees its output.
+    # A DEDICATED parallel config, not the policy's. DFlashBody is context-parallel
+    # unaware and rejects context_parallel_size > 1 outright; passing the policy's
+    # provider straight through therefore makes the drafter unusable on any recipe that
+    # runs CP, which is most 120B recipes. The body always runs CP=1 and the target's
+    # CP-sharded hidden states are gathered before they reach it, so copying only the
+    # fields the body actually needs -- and leaving context_parallel_size at its default
+    # of 1 -- is what lets the policy keep CP > 1. Mirrors the DFlash provider.
+    from megatron.core.model_parallel_config import ModelParallelConfig
+
+    parallel_config = ModelParallelConfig(
+        tensor_model_parallel_size=model_provider.tensor_model_parallel_size,
+        use_cpu_initialization=model_provider.use_cpu_initialization,
+        fp16=model_provider.fp16,
+        bf16=model_provider.bf16,
+        params_dtype=model_provider.params_dtype,
+        sequence_parallel=False,
+    )
     body = DFlashBody(
         config=DFlashBodyConfig(
             hidden_size=head_cfg.model_hidden_size,
             num_attention_heads=head_cfg.num_heads,
         ),
-        parallel_config=model_provider,
+        parallel_config=parallel_config,
         tp_group=getattr(pg_collection, "tp", None),
     )
 
