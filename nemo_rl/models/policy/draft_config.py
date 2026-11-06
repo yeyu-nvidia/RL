@@ -373,7 +373,12 @@ class LiLiCorrDraftConfig(_MegatronBlockDraftConfigBase):
         if self.gamma is None:
             block_size = checkpoint.get("block_size", dflash.get("block_size"))
             if block_size is not None:
-                object.__setattr__(self, "gamma", int(block_size))
+                # gamma counts MASK slots only. A DFlash block is one anchor plus gamma
+                # masks, and the reranker scores exactly the mask slots
+                # (num_candidate_slots = block_size - 1), so gamma = block_size - 1.
+                # Mapping gamma straight from block_size makes the block one slot too
+                # long and the head rejects it at the first step.
+                object.__setattr__(self, "gamma", int(block_size) - 1)
         if self.mask_token_id is None and dflash.get("mask_token_id") is not None:
             object.__setattr__(self, "mask_token_id", int(dflash["mask_token_id"]))
         if self.target_hidden_state_layer_ids is None and dflash.get(

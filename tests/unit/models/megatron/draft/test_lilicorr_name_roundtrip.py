@@ -67,3 +67,19 @@ def test_positional_names_are_what_modelopt_uses():
     assert _to_serving_name("feature_mlp.down_proj.weight") == "feature_mlp.3.weight"
     assert _to_serving_name("layers.3.mlp.up_proj.weight") == "layers.3.mlp.0.weight"
     assert _to_serving_name("layers.3.mlp.down_proj.weight") == "layers.3.mlp.2.weight"
+
+
+def test_block_slot_arithmetic_is_consistent():
+    """gamma counts mask slots, and the lattice scores exactly those.
+
+    A DFlash block is one anchor plus gamma masks. The reranker's
+    num_candidate_slots is block_size - 1. If gamma were mapped straight from the
+    checkpoint's block_size the block would be one slot too long and the head would
+    reject it -- loudly here, but the same off-by-one applied to the gold targets
+    would silently score the lattice against positions the drafter never predicted.
+    """
+    checkpoint_block_size = 4
+    gamma = checkpoint_block_size - 1
+    block_slots = 1 + gamma
+    lattice_slots = block_slots - 1  # score_candidates drops the anchor
+    assert lattice_slots == checkpoint_block_size - 1

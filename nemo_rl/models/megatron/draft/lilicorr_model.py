@@ -218,15 +218,23 @@ class LiLiCorrDraftModel(MegatronModule):
         lattice the reranker scores, and a gradient through topk is meaningless.
         """
         student_logits = block_hidden @ output_weight.T
+
+        # Slot 0 is the anchor -- a committed token, not a prediction. The reranker
+        # scores only the mask slots (num_candidate_slots = block_size - 1), so the
+        # lattice inputs drop it. Passing the full block makes the head reject the
+        # shape, and silently trimming the wrong end would score the lattice against
+        # positions the drafter never predicted.
+        mask_hidden = block_hidden[:, 1:]
+        mask_logits = student_logits[:, 1:]
         topk = self.lilicorr.candidate_topk
         cand_logprobs, cand_ids = torch.log_softmax(
-            student_logits.detach().float(), dim=-1
+            mask_logits.detach().float(), dim=-1
         ).topk(topk, dim=-1)
 
         start_scores, pair_scores = self.lilicorr(
             candidate_token_ids=cand_ids,
             candidate_log_probs=cand_logprobs,
-            pass_hidden=block_hidden,
+            pass_hidden=mask_hidden,
             embed_tokens=embed_tokens,
             anchor_hidden=anchor_hidden,
             anchor_valid=anchor_valid,

@@ -102,26 +102,19 @@ class LiLiCorrHeadConfig:
 
 
 def build_lilicorr_head(config: LiLiCorrHeadConfig) -> nn.Module:
-    """Instantiate ModelOpt's LiLiCorrHead.
+    """Instantiate the native LiLiCorr reranker head.
 
-    Imported rather than reimplemented. The released drafters were trained with exactly
-    this module, so a local copy would be a second definition free to drift from the
-    weights it has to load -- and an earlier hand-written version here was wrong in ways
-    the parameter *names* hid: ``feature_norm`` is [5], a learned weighting across the
-    five captured target layers, not a projection of the 4096-dim hidden, and the three
-    factor heads emit ``factor_dim`` vectors for cosine scoring rather than a scalar.
+    Native to NeMo-RL rather than imported from ModelOpt. ModelOpt ships Megatron
+    plugins for eagle and medusa but none for lilicorr, so importing its HF module here
+    was a pattern used nowhere else in this tree -- DFlash and DSpark define their heads
+    natively, Eagle3 imports ModelOpt's *Megatron* plugin.
 
-    ModelOpt is already a NeMo-RL dependency (see ``nemo_rl/modelopt/``), so this adds no
-    new one.
+    The port is a faithful copy, and
+    ``tests/unit/models/megatron/draft/test_lilicorr_head_equivalence.py`` pins it
+    numerically against ModelOpt's head so divergence surfaces as a failing test rather
+    than as a drafter that loads and serves noise.
     """
-    try:
-        from modelopt.torch.speculative.plugins.modeling_lilicorr import LiLiCorrHead
-    except ImportError as exc:  # pragma: no cover - depends on the install
-        raise ImportError(
-            "speculator_type=lilicorr needs modelopt's LiLiCorrHead "
-            "(modelopt.torch.speculative.plugins.modeling_lilicorr). Install "
-            "nvidia-modelopt in the training image."
-        ) from exc
+    from nemo_rl.models.megatron.draft.lilicorr_head import LiLiCorrHead
 
     return LiLiCorrHead(
         model_hidden_size=config.model_hidden_size,

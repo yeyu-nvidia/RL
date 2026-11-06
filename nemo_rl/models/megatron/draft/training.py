@@ -1238,10 +1238,20 @@ class LiLiCorrSpeculator(DFlashSpeculator):
             raise RuntimeError("LiLiCorr loss_stats ran without a DFlash output")
 
         plan = dflash_output.plan
+        # Drop the anchor column, matching score_candidates: the lattice scores the
+        # mask slots only, so the gold path must index the same ones. DFlash's own
+        # objective does the same thing with loss_mask[:, 1:].
         target_ids = data["input_ids"][
             plan.sample_rows[:, None],
             plan.label_positions,
-        ]
+        ][:, 1:]
+        if target_ids.shape[-1] != output.candidate_ids.shape[-2]:
+            raise RuntimeError(
+                f"LiLiCorr gold targets have {target_ids.shape[-1]} slots but the "
+                f"lattice scored {output.candidate_ids.shape[-2]}. gamma and the "
+                "checkpoint's block_size disagree; scoring these against each other "
+                "would train the lattice toward the wrong positions."
+            )
         gold = gold_index_from_candidates(output.candidate_ids, target_ids)
         head = data.get("lilicorr_head")
         if head is None:
