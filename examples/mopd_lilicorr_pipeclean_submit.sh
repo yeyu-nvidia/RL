@@ -28,9 +28,12 @@ export CONTAINER
 # flag alone does not set it. JHB nodes advertise gpu:4, and ray.sub refuses the
 # mismatch rather than bringing up a Ray cluster that half-claims each node.
 export GPUS_PER_NODE=${GPUS_PER_NODE:-4}
-# /lustre carries the target, the drafter and the results dir; hf-local carries the
-# TextTower weights the recipe pins.
-export MOUNTS="/lustre:/lustre"
+# /lustre carries the target, the drafter and the results dir. /scratch has to be here
+# too: the /lustre paths are symlinks whose real target is /scratch/fsw/..., and pyxis
+# chdirs to the RESOLVED submit dir inside the container. Mounting only /lustre leaves
+# that directory nonexistent in the container and the Ray head dies at startup with
+# "couldn't chdir to /scratch/fsw/...", which reads like a Ray problem and is not one.
+export MOUNTS="/lustre:/lustre,/scratch:/scratch"
 export COMMAND="examples/mopd_lilicorr_pipeclean.sh grpo.max_num_steps=${STEPS} logger.wandb_enabled=True"
 export HF_HOME=${HF_HOME:-/lustre/fsw/portfolios/cosmos/users/yeyu/hf_home}
 export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
