@@ -23,7 +23,7 @@ import warnings
 from collections import OrderedDict, defaultdict
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, Iterator, Optional, TypeVar, cast
+from typing import Any, Iterable, Iterator, Optional, Tuple, TypeVar, cast
 
 log = logging.getLogger(__name__)
 
@@ -1204,6 +1204,22 @@ class MegatronPolicyWorkerImpl(
         )
         self._maybe_enable_manual_gc()
 
+    def _resolve_draft_aux_layer_indices(self) -> Optional[Tuple[int, ...]]:
+        """Which target layers the drafter reads, resolved once per worker.
+
+        Returning None keeps the eagle3 fallback, which is correct for eagle3 and
+        wrong for a block drafter -- see resolve_draft_aux_layer_indices.
+        """
+        if not hasattr(self, "_draft_aux_layer_indices_cache"):
+            from nemo_rl.models.megatron.draft.utils import (
+                resolve_draft_aux_layer_indices,
+            )
+
+            self._draft_aux_layer_indices_cache = resolve_draft_aux_layer_indices(
+                self.cfg["draft"]
+            )
+        return self._draft_aux_layer_indices_cache
+
     def enable_forward_pre_hook(self):
         assert isinstance(self.model, DistributedDataParallel)
         if not self._forward_pre_hook_enabled():
@@ -1538,6 +1554,11 @@ class MegatronPolicyWorkerImpl(
 
                     # Forward pass.
                     draft_enabled = "draft" in self.cfg and self.cfg["draft"].enabled
+                    draft_aux_layer_indices = (
+                        self._resolve_draft_aux_layer_indices()
+                        if draft_enabled
+                        else None
+                    )
                     use_router_replay = _should_use_router_replay(
                         enabled=self._router_replay_enabled,
                         data=batch,
@@ -1561,6 +1582,7 @@ class MegatronPolicyWorkerImpl(
                             model_slices_context_parallel_inputs=self.model_slices_context_parallel_inputs,
                             draft_model=self.draft_model,
                             enable_hidden_capture=draft_enabled,
+                            draft_aux_layer_indices=draft_aux_layer_indices,
                             use_fused_linear_logprobs=self.cfg["megatron_cfg"].get(
                                 "use_fused_linear_logprobs", False
                             ),
@@ -2219,6 +2241,9 @@ class MegatronPolicyWorkerImpl(
         placeholder_n = torch.tensor(1.0, device="cuda")
 
         draft_enabled = "draft" in self.cfg and self.cfg["draft"].enabled
+        draft_aux_layer_indices = (
+            self._resolve_draft_aux_layer_indices() if draft_enabled else None
+        )
         use_router_replay = _should_use_router_replay(
             enabled=self._router_replay_enabled,
             data=data,
@@ -2250,6 +2275,7 @@ class MegatronPolicyWorkerImpl(
                     model_slices_context_parallel_inputs=self.model_slices_context_parallel_inputs,
                     draft_model=self.draft_model,
                     enable_hidden_capture=draft_enabled,
+                    draft_aux_layer_indices=draft_aux_layer_indices,
                     use_fused_linear_logprobs=self.cfg["megatron_cfg"].get(
                         "use_fused_linear_logprobs", False
                     ),

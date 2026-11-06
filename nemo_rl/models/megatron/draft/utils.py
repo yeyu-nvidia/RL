@@ -14,12 +14,13 @@
 
 from __future__ import annotations
 
+import os
 import json
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, cast
+from typing import Any, Callable, Iterator, Mapping, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -1441,3 +1442,57 @@ def build_draft_model(
         param.grad_norm_group = DRAFT_GRAD_NORM_GROUP
 
     return draft_model
+
+
+def resolve_draft_aux_layer_indices(draft_cfg: Any) -> Optional[Tuple[int, ...]]:
+    """Resolve which target layers the drafter reads, for the Megatron capture.
+
+    A block drafter (dflash, dspark, lilicorr) is pretrained against specific target
+    layers, named in its own checkpoint as ``dflash_config.target_layer_ids``. The
+    capture otherwise falls back to the eagle3 heuristic, which picks different layers
+    on the same target -- the draft then trains on features it was never built to read,
+    with no error and no symptom beyond a drafter that never reaches a useful
+    acceptance length.
+
+    ``target_layer_ids`` already uses the "output of decoder layer i" convention that
+    Megatron's capture indexes by (``global_idx = layer_number - 1``), so no shift is
+    applied here. That is NOT true of ``aux_hidden_state_layer_ids`` in speculators /
+    vLLM checkpoints, which are offset by one; the automodel path shifts those at
+    ``automodel/draft/setup.py``.
+
+    Returns None when nothing pins the layers, which preserves the eagle3 fallback.
+    """
+    explicit = getattr(draft_cfg, "aux_layer_indices", None)
+    if explicit:
+        return tuple(int(i) for i in explicit)
+
+    model_name = getattr(draft_cfg, "model_name", None)
+    if not model_name:
+        return None
+
+    config_path = os.path.join(model_name, "config.json")
+    if not os.path.isfile(config_path):
+        return None
+
+    with open(config_path) as handle:
+        checkpoint_config = json.load(handle)
+
+    layer_ids = checkpoint_config.get("dflash_config", {}).get("target_layer_ids")
+    if not layer_ids:
+        return None
+
+    resolved = tuple(int(i) for i in layer_ids)
+    if any(i < 0 for i in resolved):
+        raise ValueError(
+            f"[draft] {config_path} names negative target_layer_ids {resolved}. "
+            "Refusing to guess which layers the drafter reads."
+        )
+
+    num_target_layers = checkpoint_config.get("num_target_layers")
+    if num_target_layers is not None and max(resolved) >= int(num_target_layers):
+        raise ValueError(
+            f"[draft] {config_path} names target_layer_ids {resolved}, but the "
+            f"checkpoint reports only {num_target_layers} target layers. The drafter "
+            "and the target it is being co-trained against do not agree."
+        )
+    return resolved
