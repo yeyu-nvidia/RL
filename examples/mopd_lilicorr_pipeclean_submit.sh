@@ -24,6 +24,10 @@ STEPS=${STEPS:-3}
 cd "$RL_DIR"
 
 export CONTAINER
+# ray.sub reads GPUS_PER_NODE from the environment and defaults it to 8; the sbatch
+# flag alone does not set it. JHB nodes advertise gpu:4, and ray.sub refuses the
+# mismatch rather than bringing up a Ray cluster that half-claims each node.
+export GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 # /lustre carries the target, the drafter and the results dir; hf-local carries the
 # TextTower weights the recipe pins.
 export MOUNTS="/lustre:/lustre"
