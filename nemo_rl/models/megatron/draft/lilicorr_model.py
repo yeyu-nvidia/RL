@@ -25,6 +25,7 @@ import json
 import os
 
 import torch
+from torch import Tensor
 from typing import TYPE_CHECKING, Any
 
 from megatron.core.transformer.module import MegatronModule
@@ -166,27 +167,40 @@ class LiLiCorrDraftModel(MegatronModule):
         target_taps: Any,
         block_embeddings: Any,
         plan: Any,
-        lm_head: Any,
-        embed_tokens: Any,
-        anchor_hidden: Any,
-        anchor_valid: Any = None,
-    ) -> "LiLiCorrDraftOutput":
-        """Run the backbone, then rescore its proposals.
+        sequence_layout: Any = None,
+        context_parallel_group: Any = None,
+    ) -> Tensor:
+        """Run the DFlash backbone and return its block hidden states.
 
-        Returns both sets of logits rather than one replacing the other: the backbone's
-        next-token logits feed the existing draft cross-entropy unchanged, and the
-        reranker's per-candidate scores feed the CE/margin/penalty terms. A forward that
-        surfaced only one of them would silently leave half the model untrained.
+        Deliberately the SAME signature and return type as :class:`DFlashBody`, so the
+        Megatron train step and DFlashSpeculator.forward drive this drafter unchanged.
+        The reranker is a separate call (:meth:`score_candidates`) rather than part of
+        this forward: folding it in here would mean returning a tuple that every DFlash
+        call site would have to special-case.
         """
-        block_hidden = self.body(
+        return self.body(
             target_taps=target_taps,
             block_embeddings=block_embeddings,
             plan=plan,
+            sequence_layout=sequence_layout,
+            context_parallel_group=context_parallel_group,
         )
-        student_logits = lm_head(block_hidden)
 
-        # Candidates are the backbone's own top-k, detached: they index the lattice the
-        # reranker scores, and a gradient through an argmax/topk is meaningless anyway.
+    def score_candidates(
+        self,
+        *,
+        block_hidden: Tensor,
+        output_weight: Tensor,
+        embed_tokens: Any,
+        anchor_hidden: Tensor,
+        anchor_valid: Any = None,
+    ) -> "LiLiCorrDraftOutput":
+        """Rescore the backbone's own top-k proposals with the candidate lattice.
+
+        Candidates come from the backbone's logits and are DETACHED: they index the
+        lattice the reranker scores, and a gradient through topk is meaningless.
+        """
+        student_logits = block_hidden @ output_weight.T
         topk = self.lilicorr.candidate_topk
         cand_logprobs, cand_ids = torch.log_softmax(
             student_logits.detach().float(), dim=-1
@@ -274,3 +288,35 @@ def build_lilicorr_draft_model(
     if model_provider.params_dtype is not None:
         model = model.to(model_provider.params_dtype)
     return model
+
+
+def export_lilicorr_weights_to_hf(model: Any) -> list[tuple[Tensor, Tensor]]:
+    """Export a LiLiCorr drafter: DFlash body plus the reranker head.
+
+    The body goes through DFlash's exporter, which gathers its tensor-parallel shards
+    into logical full weights. The reranker is REPLICATED rather than sharded -- it is
+    built from plain nn.Linear, so every tensor-parallel rank holds an identical copy --
+    so its tensors are emitted as-is under the ``lilicorr.`` prefix that the serving
+    checkpoint uses.
+    """
+    from nemo_rl.models.megatron.draft.utils import (
+        export_dflash_weights_to_hf,
+        unwrap_model,
+    )
+
+    module = unwrap_model(model)
+    body = getattr(module, "body", None)
+    head = getattr(module, "lilicorr", None)
+    if body is None or head is None:
+        raise RuntimeError(
+            "export_lilicorr_weights_to_hf expects a LiLiCorrDraftModel carrying both a "
+            "DFlash body and a reranker head."
+        )
+
+    exported = list(export_dflash_weights_to_hf(body))
+    exported.extend(
+        (f"lilicorr.{name}", tensor.detach())
+        for name, tensor in head.state_dict().items()
+    )
+    return exported
+

@@ -379,13 +379,16 @@ class DraftLossWrapper:
                 draft_loss = stats.normalized(
                     normalization_counts=normalization_counts,
                 )
-        return self._combine(policy_loss, draft_loss, metrics)
+        return self._combine(
+            policy_loss, draft_loss, metrics, aux_loss=data.get(DRAFT_AUX_LOSS_KEY)
+        )
 
     def _combine(
         self,
         policy_loss: torch.Tensor,
         draft_loss: torch.Tensor,
         metrics: dict[str, Any],
+        aux_loss: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         from nemo_rl.models.megatron.draft.step_state import DRAFT_LOSS_METRIC_KEY
 
@@ -395,12 +398,9 @@ class DraftLossWrapper:
         # policy.draft.loss_weight scales the whole draft contribution, not just part of
         # it -- otherwise turning the weight down would leave the extra term at full
         # strength and quietly keep perturbing the policy.
-        aux = getattr(self, "aux_draft_loss", None)
-        if aux is not None:
-            aux_tensor = aux() if callable(aux) else aux
-            if aux_tensor is not None:
-                draft_loss = draft_loss + aux_tensor
-                metrics["draft_aux_loss"] = float(aux_tensor.detach().item())
+        if aux_loss is not None:
+            draft_loss = draft_loss + aux_loss
+            metrics["draft_aux_loss"] = float(aux_loss.detach().item())
 
         combined_loss = policy_loss + self.loss_weight * draft_loss
         draft_loss_value = float(draft_loss.detach().item())

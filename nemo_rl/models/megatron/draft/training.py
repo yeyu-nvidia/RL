@@ -1123,11 +1123,14 @@ class DSparkSpeculator:
 
 
 @dataclass(frozen=True)
-class LiLiCorrSpeculator:
-    """Co-train a pretrained LiLiCorr drafter: DFlash backbone + candidate-lattice reranker.
+class LiLiCorrSpeculator(DFlashSpeculator):
+    """Co-train a pretrained LiLiCorr drafter: DFlash backbone + candidate lattice.
 
-    The backbone is the tensor-parallel :class:`DFlashBody`; only the reranker head is
-    LiLiCorr-specific -- the same split DSpark uses against DFlash.
+    Subclasses DFlashSpeculator because the two share everything except the head: the
+    anchor schedule, the loss mask, the normalization counts and the backbone objective
+    are identical, and LiLiCorr runs the very same DFlashBody. Only three things differ
+    -- where the architecture comes from (a checkpoint, not this config), the reranker
+    run on top of the backbone's proposals, and the lattice terms added to the loss.
     """
 
     config: Any
@@ -1139,11 +1142,13 @@ class LiLiCorrSpeculator:
         pg_collection: ProcessGroupCollection,
         policy_model_chunk: MegatronModule,
     ) -> MegatronModule | None:
-        """Build the LiLiCorr draft model for the policy chunk that owns it."""
+        """Build the LiLiCorr draft model (body + reranker) for this policy chunk."""
         from nemo_rl.models.megatron.draft.lilicorr_model import (
             build_lilicorr_draft_model,
         )
 
+        if not self.config.enabled:
+            return None
         return build_lilicorr_draft_model(
             model_provider=model_provider,
             draft_config=self.config,
@@ -1152,55 +1157,111 @@ class LiLiCorrSpeculator:
         )
 
     def capture_layer_ids(self) -> tuple[int, ...] | None:
-        """Target layers this drafter reads.
+        """Target layers this drafter reads, taken from its own checkpoint.
 
-        Unlike the Megatron DFlash/DSpark providers, which require the taps in config,
-        a released LiLiCorr names them in its own checkpoint. Falling back to the eagle3
-        heuristic here is silent: the draft trains on hidden states it was never built
-        to read, and the only symptom is an acceptance length that never becomes useful.
+        The config validator fills target_hidden_state_layer_ids from the checkpoint's
+        dflash_config.target_layer_ids, so a released drafter is fed the features it was
+        trained on. Returning None here would fall back to the eagle3 heuristic, which
+        picks different layers and fails silently -- the draft trains on hidden states it
+        was never built to read and the only symptom is a useless acceptance length.
         """
-        from nemo_rl.models.megatron.draft.utils import (
-            resolve_draft_aux_layer_indices,
-        )
-
-        explicit = getattr(self.config, "target_hidden_state_layer_ids", None)
-        if explicit:
-            return tuple(int(i) for i in explicit)
-        return resolve_draft_aux_layer_indices(self.config)
-
-    def prepare_batch(
-        self,
-        data: BatchedDataDict[Any],
-        *,
-        optimizer_step: int,
-        sequence_layout: "DraftSequenceLayout | None" = None,
-    ) -> Any:
-        raise NotImplementedError(
-            "LiLiCorr block-plan construction for the Megatron train step is not "
-            "implemented yet. It needs the same anchor/mask-slot plan the DSpark "
-            "provider builds (see dspark_provider.py and block_plan.py), adapted to "
-            "LiLiCorr's candidate lattice. Raising rather than returning None, which "
-            "would train the backbone on an empty plan and look like a working run."
-        )
-
-    def normalization_counts(
-        self,
-        data: BatchedDataDict[Any],
-        *,
-        optimizer_step: int,
-        sequence_layout: "DraftSequenceLayout | None" = None,
-    ) -> Any:
-        raise NotImplementedError(
-            "LiLiCorr normalization counts follow from the block plan; see prepare_batch."
-        )
+        taps = getattr(self.config, "target_hidden_state_layer_ids", None)
+        if not taps:
+            raise ValueError(
+                "LiLiCorr draft config pins no target layers and none could be read "
+                f"from {self.config.model_name!r}. Refusing to fall back to the eagle3 "
+                "heuristic, which would train the drafter on the wrong features."
+            )
+        return tuple(int(i) for i in taps)
 
     def forward(self, **kwargs: Any) -> None:
-        raise NotImplementedError(
-            "LiLiCorr forward must adapt captured target states into the drafter's "
-            "target_taps/block_embeddings/plan inputs and write data['student_logits'], "
-            "stashing the lattice term as aux_draft_loss on the loss wrapper. Model on "
-            "DSparkSpeculator.forward."
+        """Run the backbone through DFlash's path, then rescore with the lattice.
+
+        The backbone half is DFlashSpeculator.forward unchanged -- including its detach
+        of the target hidden states, which is what keeps the draft's gradient out of the
+        policy. Only the reranker is added here.
+        """
+        super().forward(**kwargs)
+
+        data = kwargs["data"]
+        draft_model = unwrap_model(kwargs["draft_model"])
+        output = data.get("dflash_output")
+        if not isinstance(output, DFlashForwardOutput):
+            raise RuntimeError("LiLiCorr backbone forward produced no DFlash output")
+        if not hasattr(draft_model, "score_candidates"):
+            raise RuntimeError(
+                "LiLiCorr speculator was given a draft model without a reranker; "
+                "build_model must return a LiLiCorrDraftModel."
+            )
+
+        plan = output.plan
+        policy = unwrap_model(kwargs["policy_model"])
+        anchor_hidden = output.hidden[:, :1]
+        # loss_stats does not receive draft_model, so hand the head over here.
+        data["lilicorr_head"] = draft_model.lilicorr
+        data["lilicorr_output"] = draft_model.score_candidates(
+            block_hidden=output.hidden,
+            output_weight=output.output_weight,
+            embed_tokens=policy.embedding.word_embeddings,
+            anchor_hidden=anchor_hidden,
+            anchor_valid=plan.slot_valid[:, :1],
         )
+
+    def loss_stats(self, **kwargs: Any) -> DraftLossStats:
+        """Backbone soft-CE from DFlash, plus the lattice path NLL as an aux term.
+
+        The backbone objective is DFlashSpeculator's, untouched. The lattice term is one
+        scalar per block rather than one value per slot, so it cannot live in
+        DraftLossStats (whose numerators/counts/weights are per-slot). It goes through
+        DRAFT_AUX_LOSS_KEY instead, which DraftLossWrapper adds INSIDE the draft
+        weighting -- so policy.draft.loss_weight scales the whole draft contribution and
+        not just the backbone half.
+        """
+        from nemo_rl.models.megatron.draft.lilicorr import (
+            gold_index_from_candidates,
+            lilicorr_lattice_nll,
+        )
+        from nemo_rl.models.megatron.draft.step_state import DRAFT_AUX_LOSS_KEY
+
+        stats = super().loss_stats(**kwargs)
+
+        data = kwargs["data"]
+        output = data.get("lilicorr_output")
+        if output is None:
+            raise RuntimeError(
+                "LiLiCorr loss_stats ran without a reranker output. forward() must "
+                "have populated data['lilicorr_output']; training the backbone alone "
+                "would silently leave the lattice untrained."
+            )
+        dflash_output = data.get("dflash_output")
+        if not isinstance(dflash_output, DFlashForwardOutput):
+            raise RuntimeError("LiLiCorr loss_stats ran without a DFlash output")
+
+        plan = dflash_output.plan
+        target_ids = data["input_ids"][
+            plan.sample_rows[:, None],
+            plan.label_positions,
+        ]
+        gold = gold_index_from_candidates(output.candidate_ids, target_ids)
+        head = data.get("lilicorr_head")
+        if head is None:
+            raise RuntimeError(
+                "LiLiCorr loss_stats could not reach the reranker head; forward() "
+                "must have stashed it in data['lilicorr_head']."
+            )
+        lattice = lilicorr_lattice_nll(
+            head, output.start_scores, output.pair_scores, gold
+        )
+        data[DRAFT_AUX_LOSS_KEY] = self.config.reranker_ce_alpha * lattice
+        return stats
+
+    def export_weights(self, model: MegatronModule) -> list[tuple[str, Tensor]]:
+        from nemo_rl.models.megatron.draft.lilicorr_model import (
+            export_lilicorr_weights_to_hf,
+        )
+
+        return export_lilicorr_weights_to_hf(model)
+
 
 _SPECULATOR_FACTORIES: dict[
     str,

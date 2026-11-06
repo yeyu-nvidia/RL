@@ -331,9 +331,52 @@ class LiLiCorrDraftConfig(_MegatronBlockDraftConfigBase):
     model_name: str | None = None
     aux_layer_indices: None = Field(default=None, exclude=True, repr=False)
     loss_weight: Annotated[float, Field(gt=0)] = 0.1
-    num_anchors: Annotated[int, Field(gt=0)] = 64
     learning_rate: Annotated[float, Field(gt=0)] = 1.0e-4
     optimizer: DraftOptimizerConfig | None = None
+
+    # Plan geometry, shared with the other Megatron block drafters so the anchor
+    # schedule, loss mask and normalization counts can be reused rather than
+    # reimplemented. gamma and mask_token_id default to the drafter checkpoint's
+    # own block_size / mask_token_id -- setting them to anything else trains
+    # against a block shape the weights were not built for.
+    anchors_per_sample: Annotated[int, Field(gt=0)] = 64
+    gamma: Annotated[int, Field(gt=0)] | None = None
+    mask_token_id: Annotated[int, Field(ge=0)] | None = None
+    seed: int = 0
+    vocab_tile_size: Annotated[int, Field(gt=0)] = 256
+    position_decay: Annotated[float, Field(gt=0, le=1)] = 1.0
+    max_cp_boundary_exclusion_fraction: Annotated[float, Field(ge=0, le=1)] = 0.25
+    update_probe_enabled: bool = False
+
+    @model_validator(mode="after")
+    def _fill_geometry_from_checkpoint(self) -> Self:
+        """Read gamma/mask_token_id/taps from the drafter checkpoint when unset."""
+        if not self.enabled or not self.model_name:
+            return self
+        import json
+        import os
+
+        config_path = os.path.join(self.model_name, "config.json")
+        if not os.path.isfile(config_path):
+            return self
+        with open(config_path) as handle:
+            checkpoint = json.load(handle)
+        dflash = checkpoint.get("dflash_config", {})
+        if self.gamma is None:
+            block_size = checkpoint.get("block_size", dflash.get("block_size"))
+            if block_size is not None:
+                object.__setattr__(self, "gamma", int(block_size))
+        if self.mask_token_id is None and dflash.get("mask_token_id") is not None:
+            object.__setattr__(self, "mask_token_id", int(dflash["mask_token_id"]))
+        if self.target_hidden_state_layer_ids is None and dflash.get(
+            "target_layer_ids"
+        ):
+            object.__setattr__(
+                self,
+                "target_hidden_state_layer_ids",
+                [int(i) for i in dflash["target_layer_ids"]],
+            )
+        return self
     # Optional override of the taps read from the checkpoint. Left None, the checkpoint's
     # target_layer_ids win -- which is what a released drafter was trained against.
     target_hidden_state_layer_ids: Annotated[list[int], Field(min_length=1)] | None = None
