@@ -79,6 +79,23 @@ _SERVING_TO_POSITIONAL = {
 }
 
 
+def _from_positional_name(name: str) -> str:
+    """Inverse of :func:`_to_serving_name`: ModelOpt module names -> serving names.
+
+    Export has to undo exactly what load did. Without this the exported head carries
+    positional names (``feature_mlp.0.weight``) while every consumer of a released
+    LiLiCorr expects serving names (``feature_norm.weight``), so the checkpoint loads
+    with those tensors missing -- silently, if the consumer is not strict.
+    """
+    for serving, positional in _SERVING_TO_POSITIONAL.items():
+        if name == positional:
+            return serving
+    for serving, positional in (("mlp.up_proj", "mlp.0"), ("mlp.down_proj", "mlp.2")):
+        if f".{positional}." in name:
+            return name.replace(f".{positional}.", f".{serving}.")
+    return name
+
+
 def _to_serving_name(name: str) -> str:
     """Map a released checkpoint name onto ModelOpt's positional module names."""
     if name in _SERVING_TO_POSITIONAL:
@@ -315,7 +332,7 @@ def export_lilicorr_weights_to_hf(model: Any) -> list[tuple[Tensor, Tensor]]:
 
     exported = list(export_dflash_weights_to_hf(body))
     exported.extend(
-        (f"lilicorr.{name}", tensor.detach())
+        (f"lilicorr.{_from_positional_name(name)}", tensor.detach())
         for name, tensor in head.state_dict().items()
     )
     return exported
