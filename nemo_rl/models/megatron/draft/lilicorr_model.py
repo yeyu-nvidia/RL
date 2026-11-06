@@ -192,7 +192,7 @@ class LiLiCorrDraftModel(MegatronModule):
             student_logits.detach().float(), dim=-1
         ).topk(topk, dim=-1)
 
-        reranker_logits, _ = self.lilicorr(
+        start_scores, pair_scores = self.lilicorr(
             candidate_token_ids=cand_ids,
             candidate_log_probs=cand_logprobs,
             pass_hidden=block_hidden,
@@ -202,7 +202,8 @@ class LiLiCorrDraftModel(MegatronModule):
         )
         return LiLiCorrDraftOutput(
             student_logits=student_logits,
-            reranker_logits=reranker_logits,
+            start_scores=start_scores,
+            pair_scores=pair_scores,
             candidate_ids=cand_ids,
         )
 

@@ -138,43 +138,58 @@ def build_lilicorr_head(config: LiLiCorrHeadConfig) -> nn.Module:
     )
 
 
-def lilicorr_reranker_loss(
-    logits: Tensor,
+def lilicorr_lattice_nll(
+    head: nn.Module,
+    start_scores: Tensor,
+    pair_scores: Tensor,
     gold_index: Tensor,
-    *,
-    ce_alpha: float = 1.0,
-    margin_alpha: float = 1.0,
-    penalty_alpha: float = 1.0,
 ) -> Tensor:
-    """Three-term reranker objective: CE + margin + penalty.
+    """Negative log-likelihood of the target path through the candidate lattice.
 
-    This is the part of LiLiCorr with no analogue in DFlash's projected soft CE or
-    DSpark's hard-CE/TVD/confidence terms. ``gold_index`` is ``-100`` where the target's
-    token is not among the candidates, which is a normal outcome rather than an error --
-    those slots contribute nothing instead of being scored against an arbitrary candidate.
+    LiLiCorr does not score slots independently -- that was a wrong guess in an earlier
+    version here. It emits ``start_scores`` ``[B, N, k]`` and ``pair_scores``
+    ``[B, N, slots-1, k, k]``, cosine similarities forming a lattice, and the quantity
+    being trained is the score of the *path* the target actually took.
+
+    ``head.compose_log_factors`` turns the raw cosines into log factors with the head's own
+    normalization, so the temperature and epsilon the checkpoint was trained with are
+    honoured rather than reinvented.
+
+    Blocks whose target was not fully proposed carry ``-100`` somewhere along the path and
+    contribute nothing: a partial path has no well-defined gold transition, and scoring it
+    against an arbitrary candidate would train the lattice toward a wrong answer exactly
+    where the backbone already failed.
     """
-    valid = gold_index.ne(-100)
-    if not bool(valid.any()):
-        return logits.sum() * 0.0
-
-    flat_logits = logits[valid]  # [N, K]
-    flat_gold = gold_index[valid]  # [N]
-
-    ce = torch.nn.functional.cross_entropy(flat_logits, flat_gold)
-
-    gold_score = flat_logits.gather(1, flat_gold.unsqueeze(1))
-    others = flat_logits.masked_fill(
-        torch.nn.functional.one_hot(flat_gold, flat_logits.size(1)).bool(),
-        float("-inf"),
+    log_start, log_pair = head.compose_log_factors(
+        start_scores=start_scores, pair_scores=pair_scores
     )
-    best_other = others.max(dim=1).values
-    margin = torch.nn.functional.relu(1.0 - (gold_score.squeeze(1) - best_other)).mean()
 
-    # Keep scores from drifting far from zero; unbounded logits make the margin term
-    # satisfiable by scale alone rather than by ranking.
-    penalty = flat_logits.pow(2).mean()
+    # A block counts only if every slot's target was proposed.
+    complete = gold_index.ne(-100).all(dim=-1)
+    if not bool(complete.any()):
+        return (log_start.sum() + log_pair.sum()) * 0.0
 
-    return ce_alpha * ce + margin_alpha * margin + penalty_alpha * penalty
+    safe = gold_index.clamp_min(0)
+    b, n, slots = safe.shape
+
+    # log P(path) = log_start[gold_0] + sum_i log_pair[i, gold_i, gold_{i+1}],
+    # normalized by the lattice's own partition function so this is a likelihood rather
+    # than an unbounded score.
+    path = log_start.gather(-1, safe[..., :1]).squeeze(-1)
+    for i in range(slots - 1):
+        step = log_pair[:, :, i]  # [B, N, k, k]
+        frm = safe[..., i].view(b, n, 1, 1).expand(b, n, 1, step.size(-1))
+        row = step.gather(2, frm).squeeze(2)  # [B, N, k]
+        path = path + row.gather(-1, safe[..., i + 1 : i + 2]).squeeze(-1)
+
+    # Partition: forward algorithm over the same factors.
+    alpha = log_start
+    for i in range(slots - 1):
+        alpha = torch.logsumexp(alpha.unsqueeze(-1) + log_pair[:, :, i], dim=-2)
+    log_z = torch.logsumexp(alpha, dim=-1)
+
+    nll = (log_z - path)[complete]
+    return nll.mean()
 
 
 @dataclass
@@ -192,7 +207,8 @@ class LiLiCorrDraftOutput:
     """
 
     student_logits: Tensor
-    reranker_logits: Tensor
+    start_scores: Tensor
+    pair_scores: Tensor
     candidate_ids: Tensor
 
     def gold_index(self, target_ids: Tensor) -> Tensor:
@@ -217,35 +233,27 @@ def gold_index_from_candidates(candidate_ids: Tensor, target_ids: Tensor) -> Ten
 
 
 def lilicorr_draft_loss(
+    head: nn.Module,
     output: LiLiCorrDraftOutput,
     target_ids: Tensor,
     *,
     backbone_loss: Tensor,
-    ce_alpha: float = 1.0,
-    margin_alpha: float = 1.0,
-    penalty_alpha: float = 1.0,
+    lattice_alpha: float = 1.0,
 ) -> tuple[Tensor, dict[str, float]]:
-    """Combine the backbone's draft loss with the reranker's three terms.
+    """Backbone draft loss plus the lattice NLL.
 
     ``backbone_loss`` comes from the existing draft cross-entropy path, so the DFlash
-    objective is unchanged and only the reranker terms are added. Returned metrics are
-    detached floats, so logging them cannot hold the graph alive.
+    objective is untouched and only the reranker term is added.
     """
     gold = output.gold_index(target_ids)
-    rerank = lilicorr_reranker_loss(
-        output.reranker_logits,
-        gold,
-        ce_alpha=ce_alpha,
-        margin_alpha=margin_alpha,
-        penalty_alpha=penalty_alpha,
-    )
-    total = backbone_loss + rerank
-    scored = int(gold.ne(-100).sum())
+    lattice = lilicorr_lattice_nll(head, output.start_scores, output.pair_scores, gold)
+    total = backbone_loss + lattice_alpha * lattice
+
+    complete = gold.ne(-100).all(dim=-1)
     return total, {
         "draft_backbone_loss": float(backbone_loss.detach()),
-        "draft_reranker_loss": float(rerank.detach()),
-        # Share of slots whose target token the backbone actually proposed. A collapse here
-        # means the reranker is being trained on almost nothing, which a falling total
-        # loss would hide.
-        "draft_candidate_hit_rate": scored / max(gold.numel(), 1),
+        "draft_lattice_nll": float(lattice.detach()),
+        # Share of blocks whose target path was fully proposed. If this collapses, the
+        # lattice trains on almost nothing while the total loss keeps falling.
+        "draft_complete_path_rate": float(complete.float().mean()),
     }
