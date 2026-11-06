@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import json
 import os
+
+import torch
 from typing import TYPE_CHECKING, Any
 
 from megatron.core.transformer.module import MegatronModule
@@ -60,6 +62,32 @@ def _load_draft_checkpoint_config(model_name: str | None) -> dict[str, Any]:
         return json.load(fh)
 
 
+# ModelOpt builds feature_mlp as nn.Sequential, so its parameters are positional
+# (feature_mlp.0.weight). Released drafters carry the serving layout
+# (feature_mlp.up_proj.weight) -- the same 14-tensor mapping as
+# NVIDIA/Model-Optimizer#3061, applied here in reverse so the checkpoint loads into the
+# module as ModelOpt defines it.
+_SERVING_TO_POSITIONAL = {
+    "feature_norm.weight": "feature_mlp.0.weight",
+    "feature_norm.bias": "feature_mlp.0.bias",
+    "feature_mlp.up_proj.weight": "feature_mlp.1.weight",
+    "feature_mlp.up_proj.bias": "feature_mlp.1.bias",
+    "feature_mlp.down_proj.weight": "feature_mlp.3.weight",
+    "feature_mlp.down_proj.bias": "feature_mlp.3.bias",
+}
+
+
+def _to_serving_name(name: str) -> str:
+    """Map a released checkpoint name onto ModelOpt's positional module names."""
+    if name in _SERVING_TO_POSITIONAL:
+        return _SERVING_TO_POSITIONAL[name]
+    # layers.N.mlp.{up,down}_proj -> layers.N.mlp.{0,2}
+    for serving, positional in (("mlp.up_proj", "mlp.0"), ("mlp.down_proj", "mlp.2")):
+        if f".{serving}." in name:
+            return name.replace(f".{serving}.", f".{positional}.")
+    return name
+
+
 def load_lilicorr_weights(head: Any, model_name: str) -> None:
     """Load ``lilicorr.*`` tensors from the drafter checkpoint into the head.
 
@@ -79,13 +107,29 @@ def load_lilicorr_weights(head: Any, model_name: str) -> None:
 
     prefix = "lilicorr."
     found: dict[str, Any] = {}
+    packed = []
     for shard in shards:
-        for key, tensor in load_file(shard).items():
+        shard_sd = load_file(shard)
+        for key, tensor in shard_sd.items():
             if not key.startswith(prefix):
                 continue
             if key.endswith(("weight_scale", "weight_scale_2", "input_scale")):
                 continue
-            found[key[len(prefix) :]] = tensor
+            # A packed NVFP4 weight is uint8 with two 4-bit values per byte, so its stored
+            # shape is half the logical one. Loading it into a float parameter would either
+            # fail on shape or, worse, succeed after a reshape and feed the reranker
+            # garbage. Point model_name at a dequantized drafter instead.
+            if tensor.dtype == torch.uint8 and f"{key}_scale" in shard_sd:
+                packed.append(key)
+                continue
+            found[_to_serving_name(key[len(prefix) :])] = tensor
+
+    if packed:
+        raise ValueError(
+            f"{len(packed)} LiLiCorr tensors in {root} are NVFP4-packed (e.g. "
+            f"{packed[:2]}). Co-training needs gradients, so point "
+            "policy.draft.model_name at a dequantized copy of the drafter."
+        )
 
     missing, unexpected = head.load_state_dict(found, strict=False)
     missing = [m for m in missing if "rotary" not in m]
