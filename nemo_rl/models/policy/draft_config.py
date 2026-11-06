@@ -304,6 +304,14 @@ class MegatronDSparkDraftConfig(_MegatronBlockDraftConfigBase):
 
 MEGATRON_BLOCK_DRAFT_ALGOS = ("dflash", "dspark")
 
+# Speculators whose training needs a stable per-row anchor schedule, and therefore
+# draft_sample_ids on every batch. DELIBERATELY separate from
+# MEGATRON_BLOCK_DRAFT_ALGOS above: that tuple also drives the config discriminator,
+# where membership plus target taps selects a "megatron_<algo>" variant. lilicorr has no
+# such variant -- it is a single checkpoint-driven config -- so adding it there would
+# route to a tag that does not exist and fail validation instead.
+BLOCK_DRAFT_ALGOS_NEEDING_SAMPLE_IDS = MEGATRON_BLOCK_DRAFT_ALGOS + ("lilicorr",)
+
 class LiLiCorrDraftConfig(_MegatronBlockDraftConfigBase):
     """Co-training a PRETRAINED LiLiCorr drafter against a live target (Megatron).
 

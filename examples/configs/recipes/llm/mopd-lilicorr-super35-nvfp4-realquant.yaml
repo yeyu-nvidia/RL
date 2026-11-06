@@ -32,24 +32,18 @@ policy:
     model_name: "/lustre/fsw/portfolios/cosmos/users/yeyu/lilicorr_super35_bf16"
     # Scales the whole draft contribution, lattice term included.
     loss_weight: 0.1
-    # Draft-side transient memory scales with num_anchors * block_size * vocab, and
+    # Draft-side transient memory scales with anchors_per_sample * gamma * vocab, and
     # co-training shares the GPU with full policy training on a 120B.
-    num_anchors: 32
+    anchors_per_sample: 32
     learning_rate: 1.0e-4
   megatron_cfg:
     # The fused path returns per-token logprobs and never materializes the full
     # next-token logits the draft's teacher distribution needs.
     use_fused_linear_logprobs: false
-    # The parent recipe runs context_parallel_size: 2, and DFlashBody raises on CP > 1
-    # ("DFlashBody does not support context_parallel_size > 1", dflash.py:441). LiLiCorr
-    # reuses that backbone, so CP must be 1 until the CP work lands (NVIDIA-NeMo/RL#3750,
-    # #3757, both still in review).
-    #
-    # This is a REAL change to the parent's parallelism, not a formality: dropping CP
-    # from 2 to 1 doubles the activation memory each rank holds for a 120B policy. If it
-    # does not fit, the options are to raise TP/PP to compensate or to land CP support in
-    # the drafter -- NOT to quietly re-enable CP, which would just raise at startup.
-    context_parallel_size: 1
+    # CP is left at the parent's value. DFlashBody itself still rejects
+    # context_parallel_size > 1, but it is built with its own ModelParallelConfig at
+    # CP=1 and the target's CP-sharded hidden states are gathered before they reach it
+    # (#3757), so the POLICY keeps context parallel.
 
 loss_fn:
   # MOPD: replace GRPO's reward-based advantage with the token-level distillation one.
