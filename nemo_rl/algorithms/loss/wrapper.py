@@ -406,6 +406,21 @@ class DraftLossWrapper:
                     global_valid_toks=global_valid_toks,
                     **loss_input,
                 )
+        # A drafter whose objective is not just next-token CE (LiLiCorr's candidate
+        # lattice, say) contributes an extra term the draft forward computed, since only
+        # it holds the lattice tensors and the head. Added INSIDE the draft weighting so
+        # policy.draft.loss_weight scales the whole draft contribution, not just part of
+        # it -- otherwise turning the weight down would leave the extra term at full
+        # strength and quietly keep perturbing the policy.
+        aux = getattr(self, "aux_draft_loss", None)
+        aux_value = 0.0
+        if aux is not None:
+            aux_tensor = aux() if callable(aux) else aux
+            if aux_tensor is not None:
+                draft_loss = draft_loss + aux_tensor
+                aux_value = float(aux_tensor.detach().item())
+                metrics["draft_aux_loss"] = aux_value
+
         combined_loss = policy_loss + self.loss_weight * draft_loss
         draft_loss_value = float(draft_loss.detach().item())
         if not self.defer_normalization:
