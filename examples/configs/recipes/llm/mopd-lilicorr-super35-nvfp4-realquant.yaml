@@ -1,0 +1,49 @@
+# QA-MOPD with a co-trained LiLiCorr drafter on Nemotron 3.5 Super, NVFP4 real quant.
+#
+# Pipeclean target: the rollout speedup a co-trained LiLiCorr buys inside MOPD. Measured
+# standalone first, outside any training loop, the released drafter gives 2.76x on
+# generation at concurrency 1 and 2.36x at 64 against the BF16 text tower -- acceptance
+# length ~5.0 and flat across batch. Rollout is ~40% of a real-quant step, so that is
+# ~1.85-1.90x end to end, not 2x: 2x would need 3.77x on rollout.
+#
+# MOPD is not a separate algorithm -- it is the GRPO trainer with adv_estimator: opd --
+# so this inherits GRPO's drafter support rather than needing its own.
+defaults: grpo-nemotron3-super-120BA12B-16n4g-megatron-qa-nvfp4-w4a16-real-300step.yaml
+
+policy:
+  draft:
+    enabled: true
+    speculator_type: lilicorr
+    # A dequantized copy. The released drafter is NVFP4-packed (two 4-bit values per
+    # byte), and co-training needs gradients; the loader refuses a packed tensor rather
+    # than reshaping it into garbage.
+    model_name: "/lustre/fsw/portfolios/cosmos/users/yeyu/lilicorr_super35_bf16"
+    # Scales the whole draft contribution, lattice term included.
+    loss_weight: 0.1
+    # Draft-side transient memory scales with num_anchors * block_size * vocab, and
+    # co-training shares the GPU with full policy training on a 120B.
+    num_anchors: 32
+    learning_rate: 1.0e-4
+  megatron_cfg:
+    # The fused path returns per-token logprobs and never materializes the full
+    # next-token logits the draft's teacher distribution needs.
+    use_fused_linear_logprobs: false
+    # The parent recipe runs context_parallel_size: 2, and DFlashBody raises on CP > 1
+    # ("DFlashBody does not support context_parallel_size > 1", dflash.py:441). LiLiCorr
+    # reuses that backbone, so CP must be 1 until the CP work lands (NVIDIA-NeMo/RL#3750,
+    # #3757, both still in review).
+    #
+    # This is a REAL change to the parent's parallelism, not a formality: dropping CP
+    # from 2 to 1 doubles the activation memory each rank holds for a 120B policy. If it
+    # does not fit, the options are to raise TP/PP to compensate or to land CP support in
+    # the drafter -- NOT to quietly re-enable CP, which would just raise at startup.
+    context_parallel_size: 1
+
+loss_fn:
+  # MOPD: replace GRPO's reward-based advantage with the token-level distillation one.
+  adv_estimator: opd
+
+logger:
+  log_dir: logs/mopd-lilicorr-super35-nvfp4
+  wandb:
+    name: mopd-lilicorr-super35-nvfp4
