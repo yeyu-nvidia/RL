@@ -305,6 +305,7 @@ def forward_with_post_processing_fn(
     straggler_timer: Optional[StragglerDetector] = None,
     draft_model: Optional[MegatronModule] = None,
     enable_hidden_capture: Optional[bool] = False,
+    draft_aux_layer_indices: Optional[Tuple[int, ...]] = None,
     enable_opd_full_capture: bool = False,
     use_fused_linear_logprobs: bool = False,
     use_router_replay: bool = False,
@@ -328,6 +329,9 @@ def forward_with_post_processing_fn(
         straggler_timer: Straggler detector for profiling the forward pass
         draft_model: Draft model for online draft model training
         enable_hidden_capture: Whether to enable hidden state capture for draft model training
+        draft_aux_layer_indices: Layers the drafter taps. None falls back to the
+            eagle3 heuristic, which is wrong for a block drafter whose checkpoint
+            names its own target_layer_ids.
         enable_opd_full_capture: Whether to capture pre-LM-head hidden states for
             the full-vocabulary MOPD teacher payload
         model_slices_context_parallel_inputs: Whether the model CP-slices its own inputs.
@@ -369,7 +373,13 @@ def forward_with_post_processing_fn(
     # opd_full capture below the unqualified name reads as the generic one. Not
     # done here: it would pull draft/*.py and three @patch paths in
     # test_train.py into an unrelated feature's review.
-    capture_context, capture = get_capture_context(model, enable_hidden_capture)
+    # Block drafters (LiLiCorr, DFlash) tap layers their CHECKPOINT names, not the
+    # eagle3 heuristic get_capture_context falls back to. Capturing the wrong layers is
+    # silent: the draft trains on hidden states it was never built to read, and the only
+    # symptom is a drafter that never reaches a useful acceptance length.
+    capture_context, capture = get_capture_context(
+        model, enable_hidden_capture, aux_layer_indices=draft_aux_layer_indices
+    )
     # Independent of the draft capture above: grabs the pre-LM-head hidden states
     # a frozen MOPD teacher ships for full-vocabulary distillation.
     opd_full_capture_context, opd_full_capture = get_opd_full_capture_context(
@@ -519,6 +529,7 @@ def megatron_forward_backward(
     straggler_timer: Optional[StragglerDetector] = None,
     draft_model: Optional[MegatronModule] = None,
     enable_hidden_capture: Optional[bool] = False,
+    draft_aux_layer_indices: Optional[Tuple[int, ...]] = None,
     enable_opd_full_capture: bool = False,
     use_fused_linear_logprobs: bool = False,
     use_router_replay: bool = False,
@@ -546,6 +557,9 @@ def megatron_forward_backward(
         straggler_timer: Straggler detector for profiling the forward pass
         draft_model: Draft model for online draft model training
         enable_hidden_capture: Whether to enable hidden state capture for draft model training
+        draft_aux_layer_indices: Layers the drafter taps. None falls back to the
+            eagle3 heuristic, which is wrong for a block drafter whose checkpoint
+            names its own target_layer_ids.
         enable_opd_full_capture: Whether to capture pre-LM-head hidden states for
             the full-vocabulary MOPD teacher payload
         model_slices_context_parallel_inputs: Whether the model CP-slices its own inputs.
