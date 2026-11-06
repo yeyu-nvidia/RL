@@ -31,6 +31,7 @@ from megatron.core.transformer.module import MegatronModule
 
 from nemo_rl.models.megatron.draft.dflash import DFlashBody, DFlashBodyConfig
 from nemo_rl.models.megatron.draft.lilicorr import (
+    LiLiCorrDraftOutput,
     LiLiCorrHeadConfig,
     build_lilicorr_head,
 )
@@ -159,15 +160,51 @@ class LiLiCorrDraftModel(MegatronModule):
         self.lilicorr = head
         self.draft_config = config
 
-    def forward(self, *args: Any, **kwargs: Any) -> Any:
-        """Run the backbone, then rescore its candidates.
+    def forward(
+        self,
+        *,
+        target_taps: Any,
+        block_embeddings: Any,
+        plan: Any,
+        lm_head: Any,
+        embed_tokens: Any,
+        anchor_hidden: Any,
+        anchor_valid: Any = None,
+    ) -> "LiLiCorrDraftOutput":
+        """Run the backbone, then rescore its proposals.
 
-        The backbone's own outputs are returned alongside the reranker logits rather than
-        replaced: the training step needs both the block logits (for the DFlash term) and
-        the reranker logits (for the CE/margin/penalty terms).
+        Returns both sets of logits rather than one replacing the other: the backbone's
+        next-token logits feed the existing draft cross-entropy unchanged, and the
+        reranker's per-candidate scores feed the CE/margin/penalty terms. A forward that
+        surfaced only one of them would silently leave half the model untrained.
         """
-        body_out = self.body(*args, **kwargs)
-        return body_out
+        block_hidden = self.body(
+            target_taps=target_taps,
+            block_embeddings=block_embeddings,
+            plan=plan,
+        )
+        student_logits = lm_head(block_hidden)
+
+        # Candidates are the backbone's own top-k, detached: they index the lattice the
+        # reranker scores, and a gradient through an argmax/topk is meaningless anyway.
+        topk = self.lilicorr.candidate_topk
+        cand_logprobs, cand_ids = torch.log_softmax(
+            student_logits.detach().float(), dim=-1
+        ).topk(topk, dim=-1)
+
+        reranker_logits, _ = self.lilicorr(
+            candidate_token_ids=cand_ids,
+            candidate_log_probs=cand_logprobs,
+            pass_hidden=block_hidden,
+            embed_tokens=embed_tokens,
+            anchor_hidden=anchor_hidden,
+            anchor_valid=anchor_valid,
+        )
+        return LiLiCorrDraftOutput(
+            student_logits=student_logits,
+            reranker_logits=reranker_logits,
+            candidate_ids=cand_ids,
+        )
 
 
 def build_lilicorr_draft_model(
@@ -194,9 +231,14 @@ def build_lilicorr_draft_model(
 
     head_cfg = LiLiCorrHeadConfig.from_checkpoint_config(ckpt_cfg)
 
+    # The backbone runs at the TARGET's width, not the reranker's. head_cfg.hidden_size
+    # (1024) is the reranker's internal width; the body consumes and emits the target's
+    # hidden (4096), which is also what the head's pass_hidden_proj expects. Building the
+    # body at 1024 fails with "mat1 and mat2 shapes cannot be multiplied (Nx1024 and
+    # 4096x1024)" the moment the head sees its output.
     body = DFlashBody(
         config=DFlashBodyConfig(
-            hidden_size=head_cfg.hidden_size,
+            hidden_size=head_cfg.model_hidden_size,
             num_attention_heads=head_cfg.num_heads,
         ),
         parallel_config=model_provider,

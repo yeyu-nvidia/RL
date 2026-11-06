@@ -193,7 +193,11 @@ class LiLiCorrDraftOutput:
 
     student_logits: Tensor
     reranker_logits: Tensor
-    gold_index: Tensor
+    candidate_ids: Tensor
+
+    def gold_index(self, target_ids: Tensor) -> Tensor:
+        """Resolve the target's token within each slot's candidates."""
+        return gold_index_from_candidates(self.candidate_ids, target_ids)
 
 
 def gold_index_from_candidates(candidate_ids: Tensor, target_ids: Tensor) -> Tensor:
@@ -214,6 +218,7 @@ def gold_index_from_candidates(candidate_ids: Tensor, target_ids: Tensor) -> Ten
 
 def lilicorr_draft_loss(
     output: LiLiCorrDraftOutput,
+    target_ids: Tensor,
     *,
     backbone_loss: Tensor,
     ce_alpha: float = 1.0,
@@ -226,20 +231,21 @@ def lilicorr_draft_loss(
     objective is unchanged and only the reranker terms are added. Returned metrics are
     detached floats, so logging them cannot hold the graph alive.
     """
+    gold = output.gold_index(target_ids)
     rerank = lilicorr_reranker_loss(
         output.reranker_logits,
-        output.gold_index,
+        gold,
         ce_alpha=ce_alpha,
         margin_alpha=margin_alpha,
         penalty_alpha=penalty_alpha,
     )
     total = backbone_loss + rerank
-    scored = int(output.gold_index.ne(-100).sum())
+    scored = int(gold.ne(-100).sum())
     return total, {
         "draft_backbone_loss": float(backbone_loss.detach()),
         "draft_reranker_loss": float(rerank.detach()),
         # Share of slots whose target token the backbone actually proposed. A collapse here
         # means the reranker is being trained on almost nothing, which a falling total
         # loss would hide.
-        "draft_candidate_hit_rate": scored / max(output.gold_index.numel(), 1),
+        "draft_candidate_hit_rate": scored / max(gold.numel(), 1),
     }
