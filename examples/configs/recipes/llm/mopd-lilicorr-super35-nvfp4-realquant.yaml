@@ -11,6 +11,18 @@
 defaults: grpo-nemotron3-super-120BA12B-16n4g-megatron-qa-nvfp4-w4a16-real-300step.yaml
 
 policy:
+  # The inherited chain resolves model_name to NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --
+  # Nemotron 3 Super, NOT 3.5. The LiLiCorr drafter below was trained against Super 3.5,
+  # so leaving the inherited value would co-train a 3.5 drafter against a 3 target: the
+  # shapes line up (hidden 4096, vocab 131072 on both), so nothing would raise -- the
+  # drafter would just learn against hidden states from the wrong model and report a
+  # plausible-looking acceptance rate. Pin the target explicitly.
+  #
+  # TextTower is the text path of Super 3.5 in BF16, which is what QA real-quant wants as
+  # its starting point (it quantizes during training; it does not load a pre-quantized
+  # checkpoint). Kinjal's NVFP4 Super-VL drop is the SERVING artifact and the reference
+  # for the measured 2.57x/1.70x -- it is not the input to this run.
+  model_name: /lustre/fsw/portfolios/coreai/projects/coreai_dlalgo_modelopt/hf-local/nvidia/NVIDIA-Nemotron-3.5-Super-120B-A12B-TextTower
   draft:
     enabled: true
     speculator_type: lilicorr
