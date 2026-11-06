@@ -41,144 +41,101 @@ from torch import Tensor, nn
 
 @dataclass
 class LiLiCorrHeadConfig:
-    """Reranker geometry, mirrored from the draft checkpoint's dflash_config."""
+    """Every constructor argument ModelOpt's LiLiCorrHead takes, read from a checkpoint.
 
-    hidden_size: int = 1024
-    num_layers: int = 2
-    num_heads: int = 8
-    mlp_ratio: float = 2.0
-    candidate_topk: int = 8
-    target_hidden_size: int = 4096
-    vocab_size: int = 131072
+    Each field maps to a key the released drafters carry in ``dflash_config``. None of it
+    is defaulted: a reranker built with guessed geometry loads cleanly and scores a
+    different function, surfacing much later as a lower acceptance length rather than as
+    an error.
+    """
+
+    model_hidden_size: int
+    hidden_size: int
+    num_layers: int
+    num_heads: int
+    mlp_ratio: float
+    block_size: int
+    candidate_topk: int
+    factor_dim: int
+    rms_norm_eps: float
+    vector_eps: float
+    logit_scale: float
+
+    _KEYS = {
+        "hidden_size": "lilicorr_hidden_size",
+        "num_layers": "lilicorr_num_layers",
+        "num_heads": "lilicorr_num_heads",
+        "mlp_ratio": "lilicorr_mlp_ratio",
+        "candidate_topk": "lilicorr_candidate_topk",
+        "factor_dim": "lilicorr_factor_dim",
+        "vector_eps": "lilicorr_vector_eps",
+        "logit_scale": "lilicorr_logit_scale",
+    }
 
     @classmethod
     def from_checkpoint_config(cls, cfg: dict) -> "LiLiCorrHeadConfig":
-        """Build from a drafter ``config.json``'s ``dflash_config`` block.
-
-        Raises rather than defaulting on a missing field: a reranker built with guessed
-        geometry loads cleanly and scores a different function, which shows up only as a
-        lower acceptance length much later.
-        """
+        """Build from a drafter ``config.json``."""
         d = cfg.get("dflash_config", cfg)
-        required = (
-            "lilicorr_hidden_size",
-            "lilicorr_num_layers",
-            "lilicorr_num_heads",
-            "lilicorr_mlp_ratio",
-            "lilicorr_candidate_topk",
-        )
-        missing = [k for k in required if k not in d]
+        missing = [src for src in cls._KEYS.values() if src not in d]
+        if "block_size" not in d and "block_size" not in cfg:
+            missing.append("block_size")
         if missing:
             raise ValueError(
-                f"draft checkpoint config is missing LiLiCorr geometry {missing}; "
+                f"draft checkpoint config is missing LiLiCorr geometry {sorted(missing)}; "
                 "refusing to default it, since a guessed reranker scores a different "
                 "function without erroring"
             )
+        kwargs = {dst: d[src] for dst, src in cls._KEYS.items()}
         return cls(
-            hidden_size=int(d["lilicorr_hidden_size"]),
-            num_layers=int(d["lilicorr_num_layers"]),
-            num_heads=int(d["lilicorr_num_heads"]),
-            mlp_ratio=float(d["lilicorr_mlp_ratio"]),
-            candidate_topk=int(d["lilicorr_candidate_topk"]),
-            target_hidden_size=int(cfg.get("hidden_size", 4096)),
-            vocab_size=int(cfg.get("vocab_size", 131072)),
+            model_hidden_size=int(cfg.get("hidden_size", 4096)),
+            block_size=int(d.get("block_size", cfg.get("block_size"))),
+            rms_norm_eps=float(cfg.get("rms_norm_eps", 1e-6)),
+            hidden_size=int(kwargs["hidden_size"]),
+            num_layers=int(kwargs["num_layers"]),
+            num_heads=int(kwargs["num_heads"]),
+            mlp_ratio=float(kwargs["mlp_ratio"]),
+            candidate_topk=int(kwargs["candidate_topk"]),
+            factor_dim=int(kwargs["factor_dim"]),
+            vector_eps=float(kwargs["vector_eps"]),
+            logit_scale=float(kwargs["logit_scale"]),
         )
 
 
-class _FeatureMLP(nn.Module):
-    """LayerNorm + up/down projection, named to match the released checkpoints."""
+def build_lilicorr_head(config: LiLiCorrHeadConfig) -> nn.Module:
+    """Instantiate ModelOpt's LiLiCorrHead.
 
-    def __init__(self, in_dim: int, hidden: int) -> None:
-        super().__init__()
-        self.feature_norm = nn.LayerNorm(in_dim)
-        self.feature_mlp = nn.ModuleDict(
-            {
-                "up_proj": nn.Linear(in_dim, hidden),
-                "down_proj": nn.Linear(hidden, hidden),
-            }
-        )
+    Imported rather than reimplemented. The released drafters were trained with exactly
+    this module, so a local copy would be a second definition free to drift from the
+    weights it has to load -- and an earlier hand-written version here was wrong in ways
+    the parameter *names* hid: ``feature_norm`` is [5], a learned weighting across the
+    five captured target layers, not a projection of the 4096-dim hidden, and the three
+    factor heads emit ``factor_dim`` vectors for cosine scoring rather than a scalar.
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.feature_mlp["down_proj"](
-            torch.nn.functional.silu(self.feature_mlp["up_proj"](self.feature_norm(x)))
-        )
-
-
-class LiLiCorrHead(nn.Module):
-    """Candidate-lattice reranker over a DFlash backbone's per-slot hidden states.
-
-    Scores ``candidate_topk`` candidates per block slot by combining the backbone's slot
-    state with each candidate's token embedding, and returns per-candidate logits the
-    training objective turns into its CE / margin / penalty terms.
+    ModelOpt is already a NeMo-RL dependency (see ``nemo_rl/modelopt/``), so this adds no
+    new one.
     """
+    try:
+        from modelopt.torch.speculative.plugins.modeling_lilicorr import LiLiCorrHead
+    except ImportError as exc:  # pragma: no cover - depends on the install
+        raise ImportError(
+            "speculator_type=lilicorr needs modelopt's LiLiCorrHead "
+            "(modelopt.torch.speculative.plugins.modeling_lilicorr). Install "
+            "nvidia-modelopt in the training image."
+        ) from exc
 
-    def __init__(self, config: LiLiCorrHeadConfig, embed_tokens: nn.Module) -> None:
-        super().__init__()
-        self.config = config
-        h = config.hidden_size
-        # Kept as a reference, not a submodule: the token embedding belongs to the policy,
-        # and registering it here would duplicate it in the draft's state dict and in the
-        # draft optimizer's param group.
-        object.__setattr__(self, "_embed_tokens", embed_tokens)
-
-        self.feature = _FeatureMLP(config.target_hidden_size, h)
-        self.token_proj = nn.Linear(config.target_hidden_size, h)
-        self.context_proj = nn.Linear(h * 2, h)
-        self.pass_hidden_proj = nn.Linear(h * 2, h)
-        self.factor_input_proj = nn.Linear(h * 3, h)
-        self.anchor_norm = nn.LayerNorm(h)
-        self.anchor_out_head = nn.Linear(h, h)
-        self.layers = nn.ModuleList(
-            nn.ModuleDict(
-                {
-                    "attn": nn.MultiheadAttention(
-                        h, config.num_heads, batch_first=True
-                    ),
-                    "mlp": nn.ModuleDict(
-                        {
-                            "up_proj": nn.Linear(h, int(h * config.mlp_ratio)),
-                            "down_proj": nn.Linear(int(h * config.mlp_ratio), h),
-                        }
-                    ),
-                }
-            )
-            for _ in range(config.num_layers)
-        )
-        self.out_head = nn.Linear(h, 1)
-
-    def forward(self, slot_hidden: Tensor, candidate_ids: Tensor) -> Tensor:
-        """Score candidates per slot.
-
-        Args:
-            slot_hidden: ``[B, S, target_hidden]`` backbone states, one per block slot.
-            candidate_ids: ``[B, S, K]`` candidate token ids from the backbone's topk.
-
-        Returns:
-            ``[B, S, K]`` reranker logits.
-        """
-        b, s, k = candidate_ids.shape
-        feat = self.feature(slot_hidden)  # [B, S, h]
-
-        # Detach the embedding lookup: the candidates are fixed ids feeding the reranker,
-        # so nothing downstream needs a gradient to the policy's embedding table, and
-        # leaving it attached lets the draft loss update policy weights.
-        cand_embed = self._embed_tokens(candidate_ids).detach()
-        cand = self.token_proj(cand_embed)  # [B, S, K, h]
-
-        ctx = self.context_proj(
-            torch.cat([feat, self.anchor_out_head(self.anchor_norm(feat))], dim=-1)
-        )
-        x = ctx.unsqueeze(2).expand(b, s, k, -1)
-        x = self.factor_input_proj(torch.cat([x, cand, x * cand], dim=-1))
-
-        x = x.reshape(b * s, k, -1)
-        for layer in self.layers:
-            attn_out, _ = layer["attn"](x, x, x, need_weights=False)
-            x = x + attn_out
-            x = x + layer["mlp"]["down_proj"](
-                torch.nn.functional.silu(layer["mlp"]["up_proj"](x))
-            )
-        return self.out_head(x).reshape(b, s, k)
+    return LiLiCorrHead(
+        model_hidden_size=config.model_hidden_size,
+        hidden_size=config.hidden_size,
+        num_layers=config.num_layers,
+        num_heads=config.num_heads,
+        mlp_ratio=config.mlp_ratio,
+        block_size=config.block_size,
+        candidate_topk=config.candidate_topk,
+        factor_dim=config.factor_dim,
+        rms_norm_eps=config.rms_norm_eps,
+        vector_eps=config.vector_eps,
+        logit_scale=config.logit_scale,
+    )
 
 
 def lilicorr_reranker_loss(

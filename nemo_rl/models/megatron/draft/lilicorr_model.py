@@ -28,7 +28,10 @@ from typing import TYPE_CHECKING, Any
 from megatron.core.transformer.module import MegatronModule
 
 from nemo_rl.models.megatron.draft.dflash import DFlashBody, DFlashBodyConfig
-from nemo_rl.models.megatron.draft.lilicorr import LiLiCorrHead, LiLiCorrHeadConfig
+from nemo_rl.models.megatron.draft.lilicorr import (
+    LiLiCorrHeadConfig,
+    build_lilicorr_head,
+)
 
 if TYPE_CHECKING:
     from megatron.core.process_groups_config import ProcessGroupCollection
@@ -57,6 +60,46 @@ def _load_draft_checkpoint_config(model_name: str | None) -> dict[str, Any]:
         return json.load(fh)
 
 
+def load_lilicorr_weights(head: Any, model_name: str) -> None:
+    """Load ``lilicorr.*`` tensors from the drafter checkpoint into the head.
+
+    Strict by construction: every head parameter must be covered and every checkpoint
+    tensor consumed. Quantized drafters carry ``weight_scale``/``weight_scale_2`` leaves
+    that belong to the packed weights, not to the head's float parameters, so they are
+    skipped explicitly rather than silently tolerated by a loose load.
+    """
+    import glob
+
+    from safetensors.torch import load_file
+
+    root = model_name if os.path.isdir(model_name) else os.path.dirname(model_name)
+    shards = sorted(glob.glob(os.path.join(root, "*.safetensors")))
+    if not shards:
+        raise FileNotFoundError(f"no .safetensors under {root}")
+
+    prefix = "lilicorr."
+    found: dict[str, Any] = {}
+    for shard in shards:
+        for key, tensor in load_file(shard).items():
+            if not key.startswith(prefix):
+                continue
+            if key.endswith(("weight_scale", "weight_scale_2", "input_scale")):
+                continue
+            found[key[len(prefix) :]] = tensor
+
+    missing, unexpected = head.load_state_dict(found, strict=False)
+    missing = [m for m in missing if "rotary" not in m]
+    if missing or unexpected:
+        raise ValueError(
+            f"LiLiCorr head did not load cleanly from {root}: "
+            f"{len(missing)} missing (e.g. {missing[:3]}), "
+            f"{len(unexpected)} unexpected (e.g. {list(unexpected)[:3]}). "
+            "A partial load leaves the reranker at its init values and collapses "
+            "acceptance without erroring."
+        )
+    print(f"  LiLiCorr head: loaded {len(found)} tensors from {root}")
+
+
 class LiLiCorrDraftModel(MegatronModule):
     """DFlash backbone with a LiLiCorr reranker on top."""
 
@@ -64,7 +107,7 @@ class LiLiCorrDraftModel(MegatronModule):
         self,
         *,
         body: DFlashBody,
-        head: LiLiCorrHead,
+        head: Any,
         config: Any,
     ) -> None:
         super().__init__(config=body.config if hasattr(body, "config") else None)
@@ -116,8 +159,12 @@ def build_lilicorr_draft_model(
         tp_group=getattr(pg_collection, "tp", None),
     )
 
-    embed = policy_model_chunk.get_input_embeddings()
-    head = LiLiCorrHead(head_cfg, embed)
+    head = build_lilicorr_head(head_cfg)
+
+    # Load the released reranker weights STRICTLY. A silent partial load is the failure
+    # this project keeps meeting: the module initialises, training runs, and acceptance is
+    # quietly near zero because the head is still at its init values.
+    load_lilicorr_weights(head, draft_config.model_name)
 
     model = LiLiCorrDraftModel(body=body, head=head, config=draft_config)
     if model_provider.params_dtype is not None:
