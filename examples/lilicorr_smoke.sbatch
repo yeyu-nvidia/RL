@@ -2,7 +2,9 @@
 #SBATCH --account=coreai_dlalgo_modelopt
 #SBATCH --partition=batch
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
+# Whole node: this partition allocates all 4 GPUs per node, and asking for
+# one is rejected as a size-limit violation. The smoke only uses GPU 0.
+#SBATCH --gpus-per-node=4
 #SBATCH --time=00:30:00
 #SBATCH --job-name=lilicorr_smoke
 #SBATCH --output=/lustre/fsw/portfolios/cosmos/users/yeyu/logs/lilicorr_smoke_%j.log
