@@ -231,13 +231,17 @@ class LiLiCorrDraftModel(MegatronModule):
             mask_logits.detach().float(), dim=-1
         ).topk(topk, dim=-1)
 
+        # The head takes [batch, blocks, slots, k]; Megatron hands us rows that already
+        # flatten batch x anchors into one dimension. Add a singleton batch rather than
+        # guessing a split: the head reshapes to (bsz * n_blocks, ...) immediately, so
+        # only the product matters and 1 x rows is the faithful mapping.
         start_scores, pair_scores = self.lilicorr(
-            candidate_token_ids=cand_ids,
-            candidate_log_probs=cand_logprobs,
-            pass_hidden=mask_hidden,
+            candidate_token_ids=cand_ids.unsqueeze(0),
+            candidate_log_probs=cand_logprobs.unsqueeze(0),
+            pass_hidden=mask_hidden.unsqueeze(0),
             embed_tokens=embed_tokens,
-            anchor_hidden=anchor_hidden,
-            anchor_valid=anchor_valid,
+            anchor_hidden=anchor_hidden.unsqueeze(0),
+            anchor_valid=None if anchor_valid is None else anchor_valid.unsqueeze(0),
         )
         return LiLiCorrDraftOutput(
             student_logits=student_logits,

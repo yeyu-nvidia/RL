@@ -1252,7 +1252,12 @@ class LiLiCorrSpeculator(DFlashSpeculator):
                 "checkpoint's block_size disagree; scoring these against each other "
                 "would train the lattice toward the wrong positions."
             )
-        gold = gold_index_from_candidates(output.candidate_ids, target_ids)
+        # start_scores/pair_scores carry the head's [batch, blocks, ...] layout, so the
+        # gold path has to match: candidate_ids is row-major [rows, slots, k], target_ids
+        # [rows, slots], and both gain the same singleton batch score_candidates added.
+        gold = gold_index_from_candidates(
+            output.candidate_ids.unsqueeze(0), target_ids.unsqueeze(0)
+        )
         head = data.get("lilicorr_head")
         if head is None:
             raise RuntimeError(

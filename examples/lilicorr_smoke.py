@@ -271,10 +271,16 @@ def main() -> int:
     print(f"[smoke] start_scores   {tuple(out.start_scores.shape)}")
     print(f"[smoke] pair_scores    {tuple(out.pair_scores.shape)}")
     assert out.candidate_ids.shape[-2] == GEOMETRY["block_size"] - 1, out.candidate_ids.shape
+    # The head's outputs carry [batch, blocks, ...]; the body's rows are row-major.
+    assert out.start_scores.shape[:2] == (1, rows), out.start_scores.shape
+    assert out.pair_scores.shape[:3] == (1, rows, GEOMETRY["block_size"] - 2), out.pair_scores.shape
 
     # 6. lattice objective, and it must produce a gradient
     target_ids = torch.randint(0, VOCAB, (rows, 1 + draft_cfg.gamma), device="cuda")[:, 1:]
-    gold = gold_index_from_candidates(out.candidate_ids, target_ids)
+    # Same singleton batch the head's outputs carry (see score_candidates).
+    gold = gold_index_from_candidates(
+        out.candidate_ids.unsqueeze(0), target_ids.unsqueeze(0)
+    )
     loss = lilicorr_lattice_nll(model.lilicorr, out.start_scores, out.pair_scores, gold)
     loss.backward()
     grads = [p for p in model.lilicorr.parameters() if p.grad is not None and p.grad.abs().sum() > 0]
