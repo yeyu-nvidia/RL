@@ -25,6 +25,11 @@ CONFIG=${CONFIG:-examples/configs/recipes/llm/mopd-lilicorr-super35-nvfp4-realqu
 # works if the image already satisfies every dependency the branch imports.
 PYTHON_BIN=${PYTHON_BIN:-python}
 
+# Persist uv's cache on shared storage. The image's cache lives inside the container,
+# so every attempt re-downloads and rebuilds torch, ray and the CUDA wheels -- ~25
+# minutes per run, which dominates the iteration loop when debugging a pipeclean.
+export UV_CACHE_DIR=${UV_CACHE_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.uv-cache}
+mkdir -p "$UV_CACHE_DIR"
 UV_BIN=${UV_BIN:-uv}
 PINNED_UV_VERSION=${PINNED_UV_VERSION:-0.11.28}   # docker/Dockerfile's pin
 

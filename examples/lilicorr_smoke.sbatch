@@ -20,6 +20,11 @@ cd "$RL_DIR"
 export PYTHONPATH="${RL_DIR}${PYTHONPATH:+:$PYTHONPATH}"
 # The image venv ships no megatron: it is installed by resolving this branch's lock,
 # which builds Megatron-LM from a git dependency. Hence uv run here, as in the pipeclean.
+# Persist uv's cache on shared storage. The image's cache lives inside the container,
+# so every attempt re-downloads and rebuilds torch, ray and the CUDA wheels -- ~25
+# minutes per run, which dominates the iteration loop when debugging a pipeclean.
+export UV_CACHE_DIR=${UV_CACHE_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.uv-cache}
+mkdir -p "$UV_CACHE_DIR"
 UV=uv
 if ! $UV lock --check >/dev/null 2>&1 && ! $UV tree --quiet >/dev/null 2>&1; then
   UVH=/lustre/fsw/portfolios/cosmos/users/yeyu/.smoke-uv
