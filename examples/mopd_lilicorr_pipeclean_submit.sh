@@ -16,7 +16,11 @@ set -eux
 # cluster.gpus_per_node, which fails after the whole cluster is up.
 
 RL_DIR=${RL_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/RL}
-CONTAINER=${CONTAINER:-/lustre/fsw/portfolios/cosmos/users/yeyu/containers/nemo-rl-v0.7.0.sqsh}
+# v0.8.0, not v0.7.0: this branch merges #3945 and #3757, both newer than the v0.7.0
+# release, and the v0.7.0 image's uv cannot parse the resulting pyproject.toml. Note
+# nemo-rl:latest is referenced in the docs but returns 404 on nvcr.io -- the published
+# tags are v0.4.0 through v0.8.0.
+CONTAINER=${CONTAINER:-/lustre/fsw/portfolios/cosmos/users/yeyu/containers/nemo-rl-v0.8.0.sqsh}
 STEPS=${STEPS:-3}
 
 [ -f "$CONTAINER" ] || { echo "container missing: $CONTAINER" >&2; exit 2; }
