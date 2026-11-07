@@ -18,5 +18,10 @@ srun --container-image="$CONTAINER" \
      bash -lc '
        set -eux
        export PYTHONPATH="'"$RL_DIR"'${PYTHONPATH:+:$PYTHONPATH}"
-       python examples/lilicorr_smoke.py --workdir /lustre/fsw/portfolios/cosmos/users/yeyu/lilicorr_smoke
+       # ray.sub puts the image venv on PATH; a bare srun does not, so `python` has no
+       # megatron. Name the venv interpreter explicitly, falling back to PATH.
+       PY=/opt/nemo_rl_venv/bin/python
+       [ -x "$PY" ] || PY=$(command -v python)
+       "$PY" -c "import megatron, nemo_rl; print(\"[smoke] megatron ok\")"
+       "$PY" examples/lilicorr_smoke.py --workdir /lustre/fsw/portfolios/cosmos/users/yeyu/lilicorr_smoke
      '
