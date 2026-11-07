@@ -47,11 +47,15 @@ def _init_megatron(tp: int = 1) -> None:
     parallel_state.initialize_model_parallel(tensor_model_parallel_size=tp)
 
 
+# Mirrors the real Super 3.5 drafter's SHAPE at small scale: the body and the reranker
+# have DIFFERENT head counts (32 vs 8 there), which is exactly the confusion that put the
+# reranker's head count into the body config. Keep them different here so the test would
+# catch it again.
 GEOMETRY = dict(
     model_hidden_size=512,   # target width; the body runs at this
     hidden_size=128,         # reranker width
     num_layers=2,
-    num_heads=4,
+    num_heads=4,             # RERANKER heads
     mlp_ratio=2.0,
     block_size=4,            # lattice slots = block_size - 1 = 3
     candidate_topk=3,
@@ -60,6 +64,12 @@ GEOMETRY = dict(
     vector_eps=1e-8,
     logit_scale=1.0,
 )
+# Body geometry, deliberately distinct from the reranker's above.
+BODY_HEADS = 8
+BODY_KV_HEADS = 4
+BODY_INTERMEDIATE = 1024
+BODY_HEAD_DIM = 64
+BODY_RMS_EPS = 1e-5      # NOT DFlashBodyConfig's 1e-6 default
 NUM_TARGET_LAYERS = 16
 TARGET_LAYER_IDS = [1, 5, 9, 13]
 MASK_TOKEN_ID = 7
@@ -91,6 +101,11 @@ def _write_checkpoint(path: pathlib.Path, dtype: torch.dtype) -> None:
         "vocab_size": VOCAB,
         "num_target_layers": NUM_TARGET_LAYERS,
         "num_hidden_layers": GEOMETRY["num_layers"],
+        "num_attention_heads": BODY_HEADS,
+        "num_key_value_heads": BODY_KV_HEADS,
+        "intermediate_size": BODY_INTERMEDIATE,
+        "head_dim": BODY_HEAD_DIM,
+        "rms_norm_eps": BODY_RMS_EPS,
         "torch_dtype": "bfloat16",
         "dflash_config": {
             "projector_type": "lilicorr",
@@ -119,7 +134,13 @@ def _write_checkpoint(path: pathlib.Path, dtype: torch.dtype) -> None:
     body = DFlashBody(
         config=DFlashBodyConfig(
             hidden_size=GEOMETRY["model_hidden_size"],
-            num_attention_heads=GEOMETRY["num_heads"],
+            intermediate_size=BODY_INTERMEDIATE,
+            num_attention_heads=BODY_HEADS,
+            num_key_value_heads=BODY_KV_HEADS,
+            head_dim=BODY_HEAD_DIM,
+            num_hidden_layers=GEOMETRY["num_layers"],
+            num_target_taps=len(TARGET_LAYER_IDS),
+            rms_norm_eps=BODY_RMS_EPS,
         ),
         parallel_config=parallel_config,
     )
@@ -187,6 +208,18 @@ def main() -> int:
     )
     model = model.cuda().eval()
     print(f"[smoke] built + loaded: {sum(p.numel() for p in model.parameters()):,} params")
+    # The body must take ITS geometry from the checkpoint, not DFlashBodyConfig's
+    # defaults and not the reranker's. rms_norm_eps is the silent one: wrong value,
+    # weights still load, outputs quietly differ.
+    bc = model.body.config
+    assert bc.num_attention_heads == BODY_HEADS, (bc.num_attention_heads, BODY_HEADS)
+    assert bc.num_key_value_heads == BODY_KV_HEADS, bc.num_key_value_heads
+    assert bc.intermediate_size == BODY_INTERMEDIATE, bc.intermediate_size
+    assert bc.head_dim == BODY_HEAD_DIM, bc.head_dim
+    assert abs(bc.rms_norm_eps - BODY_RMS_EPS) < 1e-12, bc.rms_norm_eps
+    assert bc.num_target_taps == len(TARGET_LAYER_IDS), bc.num_target_taps
+    print(f"[smoke] body geometry from checkpoint: heads={bc.num_attention_heads} "
+          f"kv={bc.num_key_value_heads} eps={bc.rms_norm_eps}")
 
     # 3. anchor plan
     batch, seq = 2, 32

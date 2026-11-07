@@ -293,11 +293,41 @@ def build_lilicorr_draft_model(
         params_dtype=model_provider.params_dtype,
         sequence_parallel=False,
     )
-    body = DFlashBody(
-        config=DFlashBodyConfig(
-            hidden_size=head_cfg.model_hidden_size,
-            num_attention_heads=head_cfg.num_heads,
+    # Body geometry comes from the DRAFTER CHECKPOINT's top-level config, not from
+    # head_cfg and not from DFlashBodyConfig's defaults.
+    #
+    # Two bugs lived here. head_cfg.num_heads is the RERANKER's head count (8 for Super
+    # 3.5) while the body has 32 -- that one fails loudly at the strict weight load. The
+    # other does not: DFlashBodyConfig's defaults pin the public Qwen3-8B-DFlash-b16
+    # artifact, whose rms_norm_eps is 1e-6, while this checkpoint trained at 1e-5. The
+    # weights load cleanly either way and the body just computes something slightly
+    # different for the rest of training.
+    #
+    # Anything the checkpoint does not name falls back to the dataclass default, so a
+    # drafter that genuinely matches the public artifact still works unchanged.
+    body_defaults = DFlashBodyConfig()
+    body_config = DFlashBodyConfig(
+        hidden_size=int(ckpt_cfg.get("hidden_size", head_cfg.model_hidden_size)),
+        intermediate_size=int(
+            ckpt_cfg.get("intermediate_size", body_defaults.intermediate_size)
         ),
+        num_attention_heads=int(
+            ckpt_cfg.get("num_attention_heads", body_defaults.num_attention_heads)
+        ),
+        num_key_value_heads=int(
+            ckpt_cfg.get("num_key_value_heads", body_defaults.num_key_value_heads)
+        ),
+        head_dim=int(ckpt_cfg.get("head_dim", body_defaults.head_dim)),
+        num_hidden_layers=int(
+            ckpt_cfg.get("num_hidden_layers", body_defaults.num_hidden_layers)
+        ),
+        num_target_taps=len(dflash_cfg.get("target_layer_ids", []))
+        or body_defaults.num_target_taps,
+        rope_theta=float(ckpt_cfg.get("rope_theta", body_defaults.rope_theta)),
+        rms_norm_eps=float(ckpt_cfg.get("rms_norm_eps", body_defaults.rms_norm_eps)),
+    )
+    body = DFlashBody(
+        config=body_config,
         parallel_config=parallel_config,
         tp_group=getattr(pg_collection, "tp", None),
     )
