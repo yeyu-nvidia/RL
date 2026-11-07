@@ -49,14 +49,23 @@ if [[ "${PIPECLEAN_CONTAINER_PYTHON:-0}" != "1" ]]; then
   "$UV_BIN" --version >&2
 fi
 
-# Extras select the environment. megatron-core/bridge live behind `mcore`, the vLLM
-# generation backend behind `vllm`, and ModelOpt real quantization behind `modelopt` --
-# a bare `uv run` installs none of them and dies on `No module named 'megatron'`. This
-# recipe is QA-MOPD: Megatron policy, vLLM rollout, NVFP4 real quant, so it needs all
-# three. Matches the repo's own `uv run --extra mcore --extra modelopt --extra vllm`.
-UV_EXTRAS=${UV_EXTRAS:---extra mcore --extra modelopt --extra vllm}
+# NO extras on the driver, and --locked.
+#
+# nemo_rl launches each Ray actor under its OWN interpreter: virtual_cluster.py defines
+# MCORE as `uv run --locked --extra mcore` and VLLM as `uv run --locked --extra vllm`.
+# The driver only has to import nemo_rl and start Ray; megatron and vllm are imported
+# inside those actors.
+#
+# Passing extras here is not merely unnecessary, it is rejected: pyproject declares
+# mcore, vllm, automodel, sglang and trtllm as mutually CONFLICTING, so
+# `--extra mcore --extra vllm` fails with "Extras ... are incompatible with the declared
+# conflicts". They cannot share one environment by design.
+#
+# --locked makes the driver use the lockfile exactly, which is also what the actors use,
+# so driver and actors agree on the shared base packages.
+UV_EXTRAS=${UV_EXTRAS:-}
 read -r -a _uv_extras <<< "$UV_EXTRAS"
-RUNNER=("$UV_BIN" run "${_uv_extras[@]}" python)
+RUNNER=("$UV_BIN" run --locked "${_uv_extras[@]}" python)
 if [[ "${PIPECLEAN_CONTAINER_PYTHON:-0}" == "1" ]]; then
   RUNNER=("$PYTHON_BIN")
 fi

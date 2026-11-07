@@ -34,7 +34,9 @@ if ! $UV lock --check >/dev/null 2>&1 && ! $UV tree --quiet >/dev/null 2>&1; the
 fi
 "$UV" --version
 # megatron-core lives behind the `mcore` extra; a bare `uv run` has no megatron.
-EXTRAS="--extra mcore"
+# The smoke imports megatron in-process, so it DOES need mcore. It must not
+# also ask for vllm: pyproject declares those extras mutually conflicting.
+EXTRAS="--locked --extra mcore"
 "$UV" run $EXTRAS python -c "import megatron, nemo_rl; print('[smoke] megatron ok')"
 "$UV" run $EXTRAS python examples/lilicorr_smoke.py --workdir "$WORKDIR"
 INNER
