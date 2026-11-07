@@ -5,7 +5,7 @@
 # Whole node: this partition allocates all 4 GPUs per node and rejects a request for
 # one as a size-limit violation. The smoke itself uses a single GPU.
 #SBATCH --gpus-per-node=4
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --job-name=lilicorr_smoke
 #SBATCH --output=/lustre/fsw/portfolios/cosmos/users/yeyu/logs/lilicorr_smoke_%j.log
 # One GPU, no Ray: exercise the drafter path while the 16-node pipeclean queues.
