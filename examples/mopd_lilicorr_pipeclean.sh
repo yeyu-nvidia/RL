@@ -28,6 +28,13 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 # Persist uv's cache on shared storage. The image's cache lives inside the container,
 # so every attempt re-downloads and rebuilds torch, ray and the CUDA wheels -- ~25
 # minutes per run, which dominates the iteration loop when debugging a pipeclean.
+# A shared cache means concurrent uv processes contend on per-package locks, and the
+# default timeout is short enough that a job dies while another is mid-build:
+#   "Could not acquire lock for .../flash-attn/2.8.1/.lock, is another uv process
+#    running? You can set UV_LOCK_TIMEOUT to increase the timeout."
+# Waiting is the right behaviour -- the waiter then reuses the wheel the holder built,
+# which is the whole point of sharing the cache. flash-attn alone can take ~1h.
+export UV_LOCK_TIMEOUT=${UV_LOCK_TIMEOUT:-5400}
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.uv-cache}
 mkdir -p "$UV_CACHE_DIR"
 UV_BIN=${UV_BIN:-uv}
