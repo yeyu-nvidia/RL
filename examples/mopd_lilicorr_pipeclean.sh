@@ -44,7 +44,14 @@ if [[ "${PIPECLEAN_CONTAINER_PYTHON:-0}" != "1" ]]; then
   "$UV_BIN" --version >&2
 fi
 
-RUNNER=("$UV_BIN" run python)
+# Extras select the environment. megatron-core/bridge live behind `mcore`, the vLLM
+# generation backend behind `vllm`, and ModelOpt real quantization behind `modelopt` --
+# a bare `uv run` installs none of them and dies on `No module named 'megatron'`. This
+# recipe is QA-MOPD: Megatron policy, vLLM rollout, NVFP4 real quant, so it needs all
+# three. Matches the repo's own `uv run --extra mcore --extra modelopt --extra vllm`.
+UV_EXTRAS=${UV_EXTRAS:---extra mcore --extra modelopt --extra vllm}
+read -r -a _uv_extras <<< "$UV_EXTRAS"
+RUNNER=("$UV_BIN" run "${_uv_extras[@]}" python)
 if [[ "${PIPECLEAN_CONTAINER_PYTHON:-0}" == "1" ]]; then
   RUNNER=("$PYTHON_BIN")
 fi

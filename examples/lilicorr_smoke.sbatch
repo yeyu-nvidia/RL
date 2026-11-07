@@ -28,8 +28,10 @@ if ! $UV lock --check >/dev/null 2>&1 && ! $UV tree --quiet >/dev/null 2>&1; the
   UV="$UVH/uv"
 fi
 "$UV" --version
-"$UV" run python -c "import megatron, nemo_rl; print('[smoke] megatron ok')"
-"$UV" run python examples/lilicorr_smoke.py --workdir "$WORKDIR"
+# megatron-core lives behind the `mcore` extra; a bare `uv run` has no megatron.
+EXTRAS="--extra mcore"
+"$UV" run $EXTRAS python -c "import megatron, nemo_rl; print('[smoke] megatron ok')"
+"$UV" run $EXTRAS python examples/lilicorr_smoke.py --workdir "$WORKDIR"
 INNER
 chmod +x "${RL_DIR}/.smoke_inner.sh"
 
