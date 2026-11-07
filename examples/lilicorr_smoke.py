@@ -237,12 +237,18 @@ def main() -> int:
     print(f"[smoke] plan: {rows} anchor rows, block_size={plan.block_size}")
 
     # 4. body forward
+    # [batch, seq, taps, hidden] -- the layout DFlashBody validates against. The real
+    # provider reaches it as hidden_states.unflatten(-1,(taps,hidden)).permute(1,0,2,3),
+    # i.e. from Megatron's [seq, batch, taps*hidden]; getting the axis order wrong here
+    # is caught by DFlashBody's own check, which is why it validates shapes at all.
     taps = len(TARGET_LAYER_IDS)
     target_taps = torch.randn(
-        taps, batch, seq, GEOMETRY["model_hidden_size"], device="cuda", dtype=dtype
+        batch, seq, taps, GEOMETRY["model_hidden_size"], device="cuda", dtype=dtype
     )
+    # [num_blocks, block_size, hidden]; block_size == 1 anchor + gamma mask slots.
+    assert plan.block_size == 1 + draft_cfg.gamma, (plan.block_size, draft_cfg.gamma)
     block_embeddings = torch.randn(
-        rows, 1 + draft_cfg.gamma, GEOMETRY["model_hidden_size"], device="cuda", dtype=dtype
+        rows, plan.block_size, GEOMETRY["model_hidden_size"], device="cuda", dtype=dtype
     )
     block_hidden = model(
         target_taps=target_taps, block_embeddings=block_embeddings, plan=plan
