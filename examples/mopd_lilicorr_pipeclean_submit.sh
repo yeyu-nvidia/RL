@@ -54,6 +54,21 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 # that directory nonexistent in the container and the Ray head dies at startup with
 # "couldn't chdir to /scratch/fsw/...", which reads like a Ray problem and is not one.
 export MOUNTS="/lustre:/lustre,/scratch:/scratch"
+# Repair nemo-lens on EVERY node, before Ray starts.
+#
+# pyproject pins nemo-lens to a rev of lens main past v0.3.0 (no release carries the
+# scoped span attributes this branch uses) and the v0.8.0 image ships an older one.
+# Doing this from the COMMAND script only fixed the head: /opt/nemo_rl_venv lives inside
+# the container, which is per-node, so the 15 worker nodes kept their stale copy and the
+# Megatron actor still died on "cannot import name 'span_attributes'".
+#
+# ray.sub runs SETUP_COMMAND on all nodes before starting Ray, which is exactly the hook
+# for this. Idempotent: it checks for the symbol first.
+export NEMO_LENS_REV=${NEMO_LENS_REV:-4d045c03186b90afdc815db46b671f6a21bc7e98}
+export SETUP_COMMAND='python -c "from nemo.lens import span_attributes" 2>/dev/null \
+  || uv pip install --python python \
+       "nemo-lens[sdk,aiohttp,fastapi] @ git+https://github.com/NVIDIA-NeMo/Lens.git@'"${NEMO_LENS_REV}"'"'
+
 export COMMAND="examples/mopd_lilicorr_pipeclean.sh grpo.max_num_steps=${STEPS} logger.wandb_enabled=True"
 # wandb: the run logs to it (logger.wandb_enabled=True), and without a key the driver
 # dies ~3 minutes in, after Ray and the actors are already up. The key lives in
