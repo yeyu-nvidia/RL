@@ -275,18 +275,43 @@ def main() -> int:
     assert out.start_scores.shape[:2] == (1, rows), out.start_scores.shape
     assert out.pair_scores.shape[:3] == (1, rows, GEOMETRY["block_size"] - 2), out.pair_scores.shape
 
-    # 6. lattice objective, and it must produce a gradient
-    target_ids = torch.randint(0, VOCAB, (rows, 1 + draft_cfg.gamma), device="cuda")[:, 1:]
-    # Same singleton batch the head's outputs carry (see score_candidates).
+    # 6. lattice objective. Two cases, because they exercise different code.
+    #
+    # (a) Targets drawn FROM the candidates, so every block's gold path exists. This is
+    #     the regime real training is in -- a drafter proposes the right token often --
+    #     and it is the only one where the lattice can learn anything.
+    # (b) Targets that are absent from the candidates, where the objective must return
+    #     exactly zero rather than scoring an arbitrary path.
+    #
+    # With uniformly random targets over a 128-token vocab and topk=3, (b) is what you
+    # get by accident, and a lattice that silently trains on nothing looks identical to
+    # one that works.
+    chosen = torch.randint(0, out.candidate_ids.shape[-1], out.candidate_ids.shape[:-1])
+    target_ids = out.candidate_ids.gather(-1, chosen.unsqueeze(-1).cuda()).squeeze(-1)
     gold = gold_index_from_candidates(
         out.candidate_ids.unsqueeze(0), target_ids.unsqueeze(0)
     )
+    assert (gold >= 0).all(), "targets drawn from the candidates must all be found"
     loss = lilicorr_lattice_nll(model.lilicorr, out.start_scores, out.pair_scores, gold)
     loss.backward()
     grads = [p for p in model.lilicorr.parameters() if p.grad is not None and p.grad.abs().sum() > 0]
     print(f"[smoke] lattice nll = {float(loss):.6f}; {len(grads)} reranker tensors got gradient")
     assert torch.isfinite(loss), loss
+    assert float(loss) > 0.0, f"a real path NLL must be positive, got {float(loss)}"
     assert grads, "lattice loss produced no gradient in the reranker"
+
+    # (b): nothing proposed, nothing to learn, and nothing to blow up on.
+    model.zero_grad(set_to_none=True)
+    absent = torch.full_like(target_ids, VOCAB - 1)
+    absent_gold = gold_index_from_candidates(
+        out.candidate_ids.unsqueeze(0), absent.unsqueeze(0)
+    )
+    if (absent_gold < 0).any():
+        zero_loss = lilicorr_lattice_nll(
+            model.lilicorr, out.start_scores, out.pair_scores, absent_gold
+        )
+        assert torch.isfinite(zero_loss), zero_loss
+        print(f"[smoke] incomplete blocks -> nll {float(zero_loss):.6f} (expected 0)")
 
     # 7. export naming
     exported = dict(export_lilicorr_weights_to_hf(model))
