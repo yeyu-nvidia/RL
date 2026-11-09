@@ -39,6 +39,20 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 # "couldn't chdir to /scratch/fsw/...", which reads like a Ray problem and is not one.
 export MOUNTS="/lustre:/lustre,/scratch:/scratch"
 export COMMAND="examples/mopd_lilicorr_pipeclean.sh grpo.max_num_steps=${STEPS} logger.wandb_enabled=True"
+# wandb: the run logs to it (logger.wandb_enabled=True), and without a key the driver
+# dies ~3 minutes in, after Ray and the actors are already up. The key lives in
+# ~/.wandb_env on this cluster; read it from there rather than committing it.
+if [[ -z "${WANDB_API_KEY:-}" && -r "$HOME/.wandb_env" ]]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.wandb_env"
+fi
+if [[ -z "${WANDB_API_KEY:-}" ]]; then
+  echo "[pipeclean] WANDB_API_KEY unset and ~/.wandb_env unreadable. Export it, or" \
+       "pass logger.wandb_enabled=False to run without it." >&2
+  exit 4
+fi
+export WANDB_API_KEY
+
 export HF_HOME=${HF_HOME:-/lustre/fsw/portfolios/cosmos/users/yeyu/hf_home}
 export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
 mkdir -p "$HF_HOME"
