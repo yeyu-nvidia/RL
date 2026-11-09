@@ -40,10 +40,25 @@ policy:
     # The fused path returns per-token logprobs and never materializes the full
     # next-token logits the draft's teacher distribution needs.
     use_fused_linear_logprobs: false
-    # CP is left at the parent's value. DFlashBody itself still rejects
-    # context_parallel_size > 1, but it is built with its own ModelParallelConfig at
-    # CP=1 and the target's CP-sharded hidden states are gathered before they reach it
-    # (#3757), so the POLICY keeps context parallel.
+    # CP=1, required by the TRAINER, not by the body.
+    #
+    # The body-level problem is fixed: DFlashBody gets its own ModelParallelConfig at
+    # CP=1 and the target's CP-sharded states are gathered before reaching it, so the
+    # body no longer constrains the policy. But grpo.py::_validate_draft_trainer_entrypoint
+    # refuses draft + context_parallel_size > 1 unless the synchronous TransferQueue
+    # trainer is used:
+    #
+    #   "policy.draft with policy.megatron_cfg.context_parallel_size > 1 requires the
+    #    synchronous TransferQueue trainer. Set data_plane.enabled=true and
+    #    grpo.async_grpo.enabled=false, or set context_parallel_size=1."
+    #
+    # The data_plane route is the other option it offers, but that path sets
+    # defer_draft_normalization=True, which DraftLossWrapper rejects in packed mode --
+    # and this recipe packs sequences. So CP=1 is the one that holds.
+    #
+    # Real cost, not a formality: this roughly doubles per-rank activation memory for a
+    # 120B policy. If it does not fit, raise TP/PP rather than re-enabling CP.
+    context_parallel_size: 1
 
 loss_fn:
   # MOPD: replace GRPO's reward-based advantage with the token-level distillation one.
