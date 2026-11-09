@@ -53,8 +53,18 @@ mkdir -p "$UV_CACHE_DIR"
 #
 # Unsetting it restores the per-actor model: MCORE actors get --extra mcore, VLLM actors
 # get --extra vllm, each in its own venv.
-# (NEMO_RL_PY_EXECUTABLES_SYSTEM=0 is exported by the submit script, before
-# ray.sub starts the cluster -- doing it here would be too late for the actors.)
+# Set the venv switches HERE as well as in the submit script.
+#
+# The image bakes NEMO_RL_PY_EXECUTABLES_SYSTEM=1 as a Dockerfile ENV, and ray.sub adds
+# no --export, so the baked value wins inside the container and the submit-side export
+# does not reach it. But the DRIVER is what resolves each actor's py_executable, so
+# setting it in this process is what actually decides whether actors get their own venvs.
+export NEMO_RL_PY_EXECUTABLES_SYSTEM=0
+export NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-true}
+export NEMO_RL_VENV_DIR=${NEMO_RL_VENV_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.nrl-venvs}
+mkdir -p "$NEMO_RL_VENV_DIR"
+echo "[pipeclean] NEMO_RL_PY_EXECUTABLES_SYSTEM=$NEMO_RL_PY_EXECUTABLES_SYSTEM" \
+     "NEMO_RL_VENV_DIR=$NEMO_RL_VENV_DIR" >&2
 
 # Keep those venvs on shared storage so they are built once rather than per job.
 UV_BIN=${UV_BIN:-uv}
