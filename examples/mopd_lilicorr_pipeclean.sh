@@ -53,12 +53,10 @@ mkdir -p "$UV_CACHE_DIR"
 #
 # Unsetting it restores the per-actor model: MCORE actors get --extra mcore, VLLM actors
 # get --extra vllm, each in its own venv.
-unset NEMO_RL_PY_EXECUTABLES_SYSTEM
+# (NEMO_RL_PY_EXECUTABLES_SYSTEM=0 is exported by the submit script, before
+# ray.sub starts the cluster -- doing it here would be too late for the actors.)
 
 # Keep those venvs on shared storage so they are built once rather than per job.
-export NEMO_RL_VENV_DIR=${NEMO_RL_VENV_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.nrl-venvs}
-mkdir -p "$NEMO_RL_VENV_DIR"
-
 UV_BIN=${UV_BIN:-uv}
 PINNED_UV_VERSION=${PINNED_UV_VERSION:-0.11.28}   # docker/Dockerfile's pin
 

@@ -28,6 +28,22 @@ STEPS=${STEPS:-3}
 cd "$RL_DIR"
 
 export CONTAINER
+# Per-actor venvs, set HERE rather than in the COMMAND script.
+#
+# docker/Dockerfile.ngc_pytorch bakes NEMO_RL_PY_EXECUTABLES_SYSTEM=1, which puts every
+# Ray actor on the driver's interpreter with no venv of its own. That is only valid when
+# the image already satisfies every actor -- this branch needs a newer nemo-lens than it
+# ships, so the Megatron worker dies on "cannot import name 'span_attributes'".
+#
+# It has to be exported before sbatch: ray.sub starts the head and workers BEFORE the
+# COMMAND script runs, so unsetting it inside COMMAND only affects the driver and the
+# actors still come up on the container interpreter.
+export NEMO_RL_PY_EXECUTABLES_SYSTEM=0
+# Actor venvs are cached; the workers' own fingerprint warning recommends this when the
+# code is newer than the container, which is exactly the case here.
+export NRL_FORCE_REBUILD_VENVS=${NRL_FORCE_REBUILD_VENVS:-true}
+export NEMO_RL_VENV_DIR=${NEMO_RL_VENV_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.nrl-venvs}
+mkdir -p "$NEMO_RL_VENV_DIR"
 # ray.sub reads GPUS_PER_NODE from the environment and defaults it to 8; the sbatch
 # flag alone does not set it. JHB nodes advertise gpu:4, and ray.sub refuses the
 # mismatch rather than bringing up a Ray cluster that half-claims each node.
