@@ -112,6 +112,29 @@ fi
 # ImportError on names the branch added (make_policy_factory). Put the checkout first.
 export PYTHONPATH="${SLURM_SUBMIT_DIR:-$PWD}${PYTHONPATH:+:$PYTHONPATH}"
 
+# Repair the one package the image is too old for.
+#
+# pyproject pins nemo-lens to a rev of lens main past v0.3.0 -- explicitly, because no
+# release carries the scoped span attributes this branch uses. The v0.8.0 image ships an
+# older lens, so both the driver and every Ray actor (which share /opt/nemo_rl_venv) die
+# with "cannot import name 'span_attributes' from 'nemo.lens'".
+#
+# Patching the shared venv is what actually works here. Per-actor venvs are the designed
+# answer, but the image bakes NEMO_RL_PY_EXECUTABLES_SYSTEM=1 and uv's project
+# environment points back at /opt/nemo_rl_venv, so the actors keep landing in the same
+# place; installing the pinned rev there fixes driver and actors together.
+#
+# Idempotent: skipped entirely when the running lens already has the symbol.
+NEMO_LENS_REV=${NEMO_LENS_REV:-4d045c03186b90afdc815db46b671f6a21bc7e98}
+if ! "$PYTHON_BIN" -c "from nemo.lens import span_attributes" >/dev/null 2>&1; then
+  echo "[pipeclean] image nemo-lens lacks span_attributes; installing pinned rev" >&2
+  "$UV_BIN" pip install --python "$PYTHON_BIN" \
+    "nemo-lens[sdk,aiohttp,fastapi] @ git+https://github.com/NVIDIA-NeMo/Lens.git@${NEMO_LENS_REV}" >&2
+  "$PYTHON_BIN" -c "from nemo.lens import span_attributes; print('[pipeclean] nemo-lens repaired')" >&2
+else
+  echo "[pipeclean] nemo-lens already provides span_attributes" >&2
+fi
+
 # Verify the BRANCH's nemo_rl is what imports -- not merely that some nemo_rl does.
 # An earlier version of this check only did `import nemo_rl`, which the image satisfies
 # from /opt/nemo-rl, so it passed and the run still died on a missing symbol.
