@@ -37,6 +37,28 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 export UV_LOCK_TIMEOUT=${UV_LOCK_TIMEOUT:-5400}
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.uv-cache}
 mkdir -p "$UV_CACHE_DIR"
+# Let each Ray actor build its own venv.
+#
+# docker/Dockerfile.ngc_pytorch sets NEMO_RL_PY_EXECUTABLES_SYSTEM=1, which rewrites
+# every uv command in PY_EXECUTABLES to SYSTEM: all actors then launch on the DRIVER's
+# interpreter and no per-actor venv is created. The design doc is explicit that this is
+# only valid "in an environment where every actor's dependencies are already installed,
+# such as a single-environment container image".
+#
+# That is exactly what this branch is not. It needs a newer nemo-lens than the image
+# ships, so the Megatron worker inherited the driver's env and died with
+# "cannot import name 'span_attributes' from 'nemo.lens'" -- after Ray, the actors and
+# the policy had all started. It also cannot be fixed by giving the driver more extras,
+# because mcore and vllm are mutually exclusive and the actors need different ones.
+#
+# Unsetting it restores the per-actor model: MCORE actors get --extra mcore, VLLM actors
+# get --extra vllm, each in its own venv.
+unset NEMO_RL_PY_EXECUTABLES_SYSTEM
+
+# Keep those venvs on shared storage so they are built once rather than per job.
+export NEMO_RL_VENV_DIR=${NEMO_RL_VENV_DIR:-/lustre/fsw/portfolios/cosmos/users/yeyu/.nrl-venvs}
+mkdir -p "$NEMO_RL_VENV_DIR"
+
 UV_BIN=${UV_BIN:-uv}
 PINNED_UV_VERSION=${PINNED_UV_VERSION:-0.11.28}   # docker/Dockerfile's pin
 
