@@ -71,6 +71,19 @@ policy:
     # mcore treats mtp_num_layers: 0 as "disable", clearing mtp_hybrid_override_pattern
     # with it, rather than building zero layers of something.
     mtp_num_layers: 0
+
+    # Build SEQUENTIAL experts, matching the checkpoint.
+    #
+    # The load fails on decoder.layers.N.mlp.experts.experts.linear_fc1._extra_state/
+    # shard_K_512 -- the grouped form, one module with 512 shards -- while the
+    # HF-converted checkpoint holds experts.experts.97.linear_fc1.weight, i.e. per-expert
+    # submodules. Those are TEGroupedMLP vs SequentialMLP, and moe_grouped_gemm is the
+    # switch between them.
+    #
+    # Set in the recipe rather than as a Hydra +override: the override was accepted
+    # (it appears in the parsed Overrides list) and the model still built grouped
+    # experts, so the value needs to be present before the provider is constructed.
+    moe_grouped_gemm: false
     # CP=1, required by the TRAINER, not by the body.
     #
     # The body-level problem is fixed: DFlashBody gets its own ModelParallelConfig at
