@@ -55,6 +55,22 @@ policy:
     # The fused path returns per-token logprobs and never materializes the full
     # next-token logits the draft's teacher distribution needs.
     use_fused_linear_logprobs: false
+
+    # Build the policy WITHOUT MTP.
+    #
+    # Super 3.5 ships num_nextn_predict_layers: 1, so the HF config carries an MTP layer
+    # and the converted checkpoint carries mtp.* weights. Two reasons to drop it here:
+    #
+    # 1. It is redundant with the drafter. MTP and LiLiCorr are both speculation
+    #    mechanisms; this recipe is measuring what the co-trained drafter buys, and
+    #    carrying MTP alongside muddies that and costs memory.
+    # 2. It is part of the checkpoint/model disagreement this recipe keeps hitting --
+    #    the load failure is on expert state, but the mtp.* branch is more surface for
+    #    the same class of mismatch.
+    #
+    # mcore treats mtp_num_layers: 0 as "disable", clearing mtp_hybrid_override_pattern
+    # with it, rather than building zero layers of something.
+    mtp_num_layers: 0
     # CP=1, required by the TRAINER, not by the body.
     #
     # The body-level problem is fixed: DFlashBody gets its own ModelParallelConfig at
