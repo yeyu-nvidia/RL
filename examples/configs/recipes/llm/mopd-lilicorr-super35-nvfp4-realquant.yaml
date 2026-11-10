@@ -10,6 +10,21 @@
 # so this inherits GRPO's drafter support rather than needing its own.
 defaults: grpo-nemotron3-super-120BA12B-16n4g-megatron-qa-nvfp4-w4a16-real-300step.yaml
 
+# Load the PRE-CONVERTED Megatron checkpoint rather than converting from HF in-flight.
+#
+# The on-the-fly HF path fails during checkpoint load on expert _extra_state shards:
+# this target has 512 routed experts with a latent MoE and an MTP layer, and the
+# converted state dict carries per-expert weights while the built model wants grouped
+# experts with sharded extra state. Megatron-Bridge has a nemotron_h bridge that handles
+# the MTP flattening and expert indices, so converting ahead of time with
+# examples/convert_super35_to_megatron.sbatch produces a checkpoint this path can load.
+#
+# Commented until the conversion lands; the run falls back to HF conversion without it.
+# checkpointing:
+#   pretrained_checkpoint:
+#     path: /lustre/fsw/portfolios/cosmos/users/yeyu/super35_texttower_megatron
+#     format: megatron_bridge
+
 policy:
   # The inherited chain resolves model_name to NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --
   # Nemotron 3 Super, NOT 3.5. The LiLiCorr drafter below was trained against Super 3.5,
