@@ -25,11 +25,20 @@ CONV_DIR="${RL_DIR}/3rdparty/Megatron-Bridge-workspace/Megatron-Bridge/scripts/c
 
 cat > "${RL_DIR}/.convert_inner.sh" <<'INNER'
 set -eux
-cd "$CONV_DIR"
+# Run from the NeMo-RL project root so `uv run` resolves its environment, but keep the
+# conversion scripts importable: run_conversion.py imports sibling modules (cpu_backend,
+# gpu_backend, arguments) by bare name.
+cd "$RL_DIR"
 export PYTHONPATH="${CONV_DIR}:${PYTHONPATH:-}"
 export UV_CACHE_DIR=/lustre/fsw/portfolios/cosmos/users/yeyu/.uv-cache
+export UV_LOCK_TIMEOUT=${UV_LOCK_TIMEOUT:-5400}
+# megatron lives behind the `mcore` extra; the image's plain python has no megatron at
+# all, which is what the first attempt died on.
+python -c "from nemo.lens import span_attributes" 2>/dev/null \
+  || uv pip install --python python \
+       "nemo-lens[sdk,aiohttp,fastapi] @ git+https://github.com/NVIDIA-NeMo/Lens.git@4d045c03186b90afdc815db46b671f6a21bc7e98"
 # run_conversion.py reads WORLD_SIZE/SLURM_NTASKS and the usual rendezvous vars.
-python run_conversion.py import \
+uv run --locked --extra mcore python "${CONV_DIR}/run_conversion.py" import \
   --device gpu \
   --hf-model "$HF_MODEL" \
   --megatron-path "$OUT" \
