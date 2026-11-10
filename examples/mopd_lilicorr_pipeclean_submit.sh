@@ -70,6 +70,8 @@ export SETUP_COMMAND='python -c "from nemo.lens import span_attributes" 2>/dev/n
        "nemo-lens[sdk,aiohttp,fastapi] @ git+https://github.com/NVIDIA-NeMo/Lens.git@'"${NEMO_LENS_REV}"'"'
 
 export COMMAND="examples/mopd_lilicorr_pipeclean.sh grpo.max_num_steps=${STEPS} logger.wandb_enabled=True"
+# CONFIG is read by the COMMAND script; export so a caller can swap recipes.
+export CONFIG=${CONFIG:-examples/configs/recipes/llm/mopd-lilicorr-super35-nvfp4-realquant.yaml}
 # wandb: the run logs to it (logger.wandb_enabled=True), and without a key the driver
 # dies ~3 minutes in, after Ray and the actors are already up. The key lives in
 # ~/.wandb_env on this cluster; read it from there rather than committing it.
@@ -91,8 +93,8 @@ mkdir -p "$HF_HOME"
 sbatch \
   --account=coreai_dlalgo_modelopt \
   --partition=batch \
-  --job-name=mopd_lilicorr_pipeclean \
-  --nodes=16 \
+  --job-name=${PIPECLEAN_JOB_NAME:-mopd_lilicorr_pipeclean} \
+  --nodes=${PIPECLEAN_NODES:-16} \
   --gpus-per-node=4 \
   --time=2:00:00 \
   --output=/lustre/fsw/portfolios/cosmos/users/yeyu/logs/mopd_lilicorr_%j.log \
